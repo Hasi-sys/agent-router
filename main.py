@@ -114,7 +114,10 @@ def call_hunter(domain: str):
 
 def get_mock_result(provider: str, need: list[str]):
     if provider == "hunter":
-        return {"verified_email": "mock@stripe.com"}
+        return {
+            "verified_email": "mock@stripe.com",
+            "mock": True
+        }
 
     if provider == "apollo":
         if "verified_email" in need:
@@ -357,7 +360,29 @@ def enrich(request: EnrichmentRequest, _: None = Depends(verify_api_key)):
 
     # IMPORTANT: this is OUTSIDE the max_latency block
     if provider == "hunter":
-        result = call_hunter(request.domain)
+        try:
+            result = call_hunter(request.domain)
+        except Exception:
+                    log_entry.update({
+                        "status": "error",
+                        "reason": "provider_unavailable",
+                        "provider": "hunter",
+                        "original_provider": original_provider,
+                        "fallback_used": provider != original_provider,
+                        "fallback_reason": fallback_reason,
+                        "cost": 0,
+                        "latency_ms": None,
+                        "result": None
+                    })
+                    save_request_to_db(log_entry)
+                    return JSONResponse(
+                        status_code=502,
+                        content={
+                            "status": "error",
+                            "provider": "hunter",
+                            "reason": "provider_unavailable"
+                        }
+                    )
 
         if "vp_sales" in request.need:
             sales_people = []

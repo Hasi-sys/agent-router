@@ -24,3 +24,18 @@ A FastAPI-based routing service that selects an enrichment provider based on req
 - FastAPI
 - SQLite
 - Uvicorn
+
+## How to Run
+
+1. Clone the repository
+2. Install dependencies:
+
+   pip install -r requirements.txt
+
+3. Start the API:
+
+   uvicorn main:app --reload --port 8002
+
+4. Open the Swagger API documentation:
+
+   http://127.0.0.1:8002/docs
