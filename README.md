@@ -39,3 +39,13 @@ A FastAPI-based routing service that selects an enrichment provider based on req
 4. Open the Swagger API documentation:
 
    http://127.0.0.1:8002/docs
+
+## Running Tests
+
+Install the project dependencies:
+
+pip install -r requirements.txt
+
+Run the automated test suite:
+
+python -m pytest -v 
