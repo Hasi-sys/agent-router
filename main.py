@@ -8,6 +8,7 @@ import json
 import os
 import urllib.request
 import urllib.parse
+import urllib.error
 from datetime import datetime, timezone
 
 load_dotenv(dotenv_path=".env", override=False)
@@ -84,8 +85,18 @@ def call_hunter(domain: str):
 
     url = f"https://api.hunter.io/v2/domain-search?{params}"
 
-    with urllib.request.urlopen(url, timeout=10) as response:
-        data = json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(url, timeout=10) as response:
+            data = json.loads(response.read().decode("utf-8"))
+
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Hunter API returned HTTP {e.code}") from e
+
+    except (urllib.error.URLError, TimeoutError) as e:
+        raise RuntimeError("Hunter API connection failed or timed out") from e
+
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise RuntimeError("Hunter API returned an invalid response") from e
 
     hunter_data = data.get("data", {})
     emails = hunter_data.get("emails", [])
@@ -163,6 +174,22 @@ def get_fallback_provider(provider: str):
         return "pdl"
 
     return "hunter"
+
+def is_live_provider(provider: str) -> bool:
+    return provider == "hunter"
+
+def get_live_fallback_provider(provider: str, need: list[str]):
+    fallback = get_fallback_provider(provider)
+
+    if (
+        fallback != provider
+        and is_live_provider(fallback)
+        and provider_supports(fallback, need)
+    ):
+        return fallback
+
+    return None    
+
 
 def save_request_to_db(entry: dict):
     cursor.execute(
@@ -362,27 +389,36 @@ def enrich(request: EnrichmentRequest, _: None = Depends(verify_api_key)):
     if provider == "hunter":
         try:
             result = call_hunter(request.domain)
+
         except Exception:
-                    log_entry.update({
+            live_fallback = get_live_fallback_provider(
+                provider,
+                request.need
+            )
+
+            if live_fallback is None:
+                log_entry.update({
+                    "status": "error",
+                    "reason": "provider_unavailable",
+                    "provider": "hunter",
+                    "original_provider": original_provider,
+                    "fallback_used": provider != original_provider,
+                    "fallback_reason": fallback_reason,
+                    "cost": 0,
+                    "latency_ms": None,
+                    "result": None,
+                })
+
+                save_request_to_db(log_entry)
+
+                return JSONResponse(
+                    status_code=502,
+                    content={
                         "status": "error",
-                        "reason": "provider_unavailable",
                         "provider": "hunter",
-                        "original_provider": original_provider,
-                        "fallback_used": provider != original_provider,
-                        "fallback_reason": fallback_reason,
-                        "cost": 0,
-                        "latency_ms": None,
-                        "result": None
-                    })
-                    save_request_to_db(log_entry)
-                    return JSONResponse(
-                        status_code=502,
-                        content={
-                            "status": "error",
-                            "provider": "hunter",
-                            "reason": "provider_unavailable"
-                        }
-                    )
+                        "reason": "provider_unavailable"
+                    }
+                )
 
         if "vp_sales" in request.need:
             sales_people = []

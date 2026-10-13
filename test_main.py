@@ -113,4 +113,51 @@ def test_enrich_cost_fallback():
     data = response.json()
     assert data["provider"] == "apollo"
     assert data["fallback_used"] is True
-    assert data["fallback_reason"] == "cost"                              
+    assert data["fallback_reason"] == "cost"
+
+from unittest.mock import patch
+
+def test_hunter_outage():
+    with patch(
+    "main.call_hunter",
+    side_effect=RuntimeError("Simulated Hunter outage")
+    ), patch("main.get_mock_result") as mock_result:
+
+        response = client.post(
+            "/enrich",
+            headers={"x-api-key": os.getenv("ROUTER_API_KEY")},
+            json={
+                "domain": "stripe.com",
+                "need": ["verified_email"],
+                "max_cost": 1,
+                "max_latency_ms": 5000
+            }
+        )
+
+    assert response.status_code == 502
+
+    data = response.json()
+    assert data["reason"] == "provider_unavailable"
+    mock_result.assert_not_called()
+
+def test_live_provider_detection():
+    from main import is_live_provider
+
+    assert is_live_provider("hunter") is True
+    assert is_live_provider("apollo") is False
+    assert is_live_provider("pdl") is False
+
+def test_live_fallback_provider():
+    from main import get_live_fallback_provider
+
+    assert get_live_fallback_provider(
+        "hunter", ["verified_email"]
+    ) is None
+
+    assert get_live_fallback_provider(
+        "apollo", ["verified_email"]
+    ) is None
+
+    assert get_live_fallback_provider(
+        "apollo", ["employee_count"]
+    ) is None                                        

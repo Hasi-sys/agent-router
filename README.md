@@ -49,3 +49,20 @@ pip install -r requirements.txt
 Run the automated test suite:
 
 python -m pytest -v 
+
+## Provider reliability
+
+Agent Router currently includes a live Hunter integration.
+
+Apollo and PDL are still mock integrations used for development and testing.
+
+If Hunter fails, Agent Router checks whether a live fallback provider is available.
+
+If no live provider can safely handle the request, Agent Router returns:
+
+- HTTP 502
+- `reason: provider_unavailable`
+
+Agent Router does not silently replace a failed live provider with mock data.
+
+Automatic runtime fallback to another live provider will be enabled after additional real provider integrations are completed.
