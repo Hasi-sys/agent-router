@@ -79,13 +79,29 @@ def test_enrich_rejects_impossible_constraints():
     assert response.json()["status"] == "rejected"
     assert response.json()["reason"] == "no_valid_provider" 
 
-def test_enrich_latency_fallback():
+def test_enrich_latency_fallback(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "APOLLO_API_KEY", "test-key")
+    monkeypatch.setattr(
+        main,
+        "call_apollo",
+        lambda domain: {
+            "vp_sales": [
+                {
+                    "name": "Test VP Sales",
+                    "title": "VP Sales"
+                }
+            ]
+        }
+    )
+
     response = client.post(
         "/enrich",
         headers={"x-api-key": os.getenv("ROUTER_API_KEY")},
         json={
             "domain": "stripe.com",
-            "need": ["verified_email"],
+            "need": ["vp_sales"],
             "max_cost": 1,
             "max_latency_ms": 1000
         }
@@ -97,13 +113,28 @@ def test_enrich_latency_fallback():
     assert data["fallback_used"] is True
     assert data["fallback_reason"] == "latency" 
 
-def test_enrich_cost_fallback():
+def test_enrich_cost_fallback(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "APOLLO_API_KEY", "test-key")
+    monkeypatch.setattr(
+        main,
+        "call_apollo",
+        lambda domain: {
+            "vp_sales": [
+                {
+                    "name": "Test VP Sales",
+                    "title": "VP Sales"
+                }
+            ]
+        }
+    )
     response = client.post(
         "/enrich",
         headers={"x-api-key": os.getenv("ROUTER_API_KEY")},
         json={
             "domain": "stripe.com",
-            "need": ["verified_email"],
+            "need": ["vp_sales"],
             "max_cost": 0.04,
             "max_latency_ms": 5000
         }
@@ -140,12 +171,19 @@ def test_hunter_outage():
     assert data["reason"] == "provider_unavailable"
     mock_result.assert_not_called()
 
-def test_live_provider_detection():
-    from main import is_live_provider
+def test_live_provider_detection(monkeypatch):
+    import main
 
-    assert is_live_provider("hunter") is True
-    assert is_live_provider("apollo") is False
-    assert is_live_provider("pdl") is False
+    monkeypatch.setattr(main, "HUNTER_API_KEY", "hunter-test-key")
+    monkeypatch.setattr(main, "APOLLO_API_KEY", None)
+
+    assert main.is_live_provider("hunter") is True
+    assert main.is_live_provider("apollo") is False
+    assert main.is_live_provider("pdl") is False
+
+    monkeypatch.setattr(main, "APOLLO_API_KEY", "apollo-test-key")
+
+    assert main.is_live_provider("apollo") is True
 
 def test_live_fallback_provider():
     from main import get_live_fallback_provider
@@ -160,4 +198,224 @@ def test_live_fallback_provider():
 
     assert get_live_fallback_provider(
         "apollo", ["employee_count"]
-    ) is None                                        
+    ) is None
+
+def test_call_apollo_requires_api_key(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "APOLLO_API_KEY", None)
+
+    try:
+        main.call_apollo("example.com")
+        assert False, "Expected ValueError"
+    except ValueError as e:
+        assert str(e) == "APOLLO_API_KEY is not configured"
+
+def test_call_apollo_success(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "APOLLO_API_KEY", "test-key")
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            pass
+
+        def read(self):
+            return b'{"people": [{"first_name": "Test", "last_name": "User", "name": "Test User", "title": "VP Sales"}]}'
+
+    def fake_urlopen(request_obj, timeout=10):
+        return FakeResponse()
+
+    monkeypatch.setattr(
+        main.urllib.request,
+        "urlopen",
+        fake_urlopen
+    )
+
+    result = main.call_apollo("example.com")
+
+    assert result["vp_sales"][0]["name"] == "Test User"
+
+def test_call_apollo_http_error(monkeypatch):
+    import main
+    import urllib.error
+
+    monkeypatch.setattr(main, "APOLLO_API_KEY", "test-key")
+
+    def fake_urlopen(request_obj, timeout=10):
+        raise urllib.error.HTTPError(
+            url="https://api.apollo.io/api/v1/people/match",
+            code=500,
+            msg="Server Error",
+            hdrs=None,
+            fp=None,
+        )
+
+    monkeypatch.setattr(main.urllib.request, "urlopen", fake_urlopen)
+
+    try:
+        main.call_apollo("example.com")
+        assert False, "Expected RuntimeError"
+    except RuntimeError as e:
+        assert "Apollo API returned HTTP 500" in str(e)
+
+def test_call_apollo_connection_error(monkeypatch):
+    import main
+    import urllib.error
+
+    monkeypatch.setattr(main, "APOLLO_API_KEY", "test-key")
+
+    def fake_urlopen(request_obj, timeout=10):
+        raise urllib.error.URLError("Connection failed")
+
+    monkeypatch.setattr(main.urllib.request, "urlopen", fake_urlopen)
+
+    try:
+        main.call_apollo("example.com")
+        assert False, "Expected RuntimeError"
+    except RuntimeError as e:
+        assert "Apollo API connection failed or timed out" in str(e)
+
+def test_call_apollo_invalid_json(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "APOLLO_API_KEY", "test-key")
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            pass
+
+        def read(self):
+            return b"not-valid-json"
+
+    def fake_urlopen(request_obj, timeout=10):
+        return FakeResponse()
+
+    monkeypatch.setattr(main.urllib.request, "urlopen", fake_urlopen)
+
+    try:
+        main.call_apollo("example.com")
+        assert False, "Expected RuntimeError"
+    except RuntimeError as e:
+        assert "Apollo API returned an invalid response" in str(e)
+
+def test_call_apollo_request_payload(monkeypatch):
+    import main
+    import json
+
+    monkeypatch.setattr(main, "APOLLO_API_KEY", "test-key")
+
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            pass
+
+        def read(self):
+            return b'{"people": []}'
+
+    def fake_urlopen(request_obj, timeout=10):
+        captured["url"] = request_obj.full_url
+        captured["data"] = json.loads(
+            request_obj.data.decode("utf-8")
+        )
+        captured["headers"] = dict(request_obj.header_items())
+        return FakeResponse()
+
+    monkeypatch.setattr(main.urllib.request, "urlopen", fake_urlopen)
+
+    main.call_apollo("example.com")
+
+    assert captured["url"] == (
+        "https://api.apollo.io/api/v1/mixed_people/api_search"
+    )
+    assert captured["data"]["q_organization_domains_list"] == ["example.com"]
+    assert captured["data"]["per_page"] == 10 
+
+def test_enrich_uses_live_apollo(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "APOLLO_API_KEY", "test-key")
+
+    called = {"apollo": False}
+
+    def fake_call_apollo(domain):
+        called["apollo"] = True
+        return {
+            "vp_sales": [
+                {
+                    "name": "Test VP Sales",
+                    "title": "VP Sales"
+                }
+            ]
+        }
+
+    monkeypatch.setattr(main, "call_apollo", fake_call_apollo)
+
+    response = client.post(
+        "/enrich",
+        headers={"x-api-key": os.getenv("ROUTER_API_KEY")},
+        json={
+            "domain": "stripe.com",
+            "need": ["vp_sales"],
+            "max_cost": 1,
+            "max_latency_ms": 1000
+        }
+    )
+
+    assert response.status_code == 200
+    assert called["apollo"] is True
+
+    data = response.json()
+    assert data["provider"] == "apollo"
+    assert data["result"]["vp_sales"][0]["name"] == "Test VP Sales"
+
+def test_hunter_falls_back_to_live_apollo(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "HUNTER_API_KEY", "hunter-test-key")
+    monkeypatch.setattr(main, "APOLLO_API_KEY", "apollo-test-key")
+
+    def fake_hunter(domain):
+        raise RuntimeError("Simulated Hunter outage")
+
+    def fake_apollo(domain):
+        return {
+            "vp_sales": [
+                {
+                    "name": "Fallback VP Sales",
+                    "title": "VP Sales"
+                }
+            ]
+        }
+
+    monkeypatch.setattr(main, "call_hunter", fake_hunter)
+    monkeypatch.setattr(main, "call_apollo", fake_apollo)
+
+    response = client.post(
+        "/enrich",
+        headers={"x-api-key": os.getenv("ROUTER_API_KEY")},
+        json={
+            "domain": "stripe.com",
+            "need": ["vp_sales"],
+            "max_cost": 1,
+            "max_latency_ms": 5000
+        }
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["provider"] == "apollo"
+    assert data["fallback_used"] is True
+    assert data["result"]["vp_sales"][0]["name"] == "Fallback VP Sales"       

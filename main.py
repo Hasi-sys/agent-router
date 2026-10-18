@@ -123,6 +123,68 @@ def call_hunter(domain: str):
         "verified_emails": verified_emails
     }
 
+def call_apollo(domain: str):
+    if not APOLLO_API_KEY:
+        raise ValueError("APOLLO_API_KEY is not configured")
+
+    url = "https://api.apollo.io/api/v1/mixed_people/api_search"
+
+    payload = json.dumps({
+        "q_organization_domains_list": [domain],
+        "person_titles": ["sales", "revenue", "commercial"],
+        "person_seniorities": ["c_suite", "vp", "head", "director"],
+        "include_similar_titles": True,
+        "per_page": 10
+    }).encode("utf-8")
+
+    request_obj = urllib.request.Request(
+        url,
+        data=payload,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "accept": "application/json",
+            "x-api-key": APOLLO_API_KEY,
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(request_obj, timeout=10) as response:
+            data = json.loads(response.read().decode("utf-8"))
+
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(
+            f"Apollo API returned HTTP {e.code}"
+        ) from e
+
+    except (urllib.error.URLError, TimeoutError) as e:
+        raise RuntimeError(
+            "Apollo API connection failed or timed out"
+        ) from e
+
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise RuntimeError(
+            "Apollo API returned an invalid response"
+        ) from e
+
+    people = data.get("people", [])
+
+    vp_sales = []
+
+    for person in people:
+        vp_sales.append({
+            "first_name": person.get("first_name"),
+            "last_name": person.get("last_name"),
+            "name": person.get("name"),
+            "title": person.get("title"),
+            "linkedin_url": person.get("linkedin_url"),
+            "organization": person.get("organization"),
+        })
+
+    return {
+        "vp_sales": vp_sales
+    }    
+
 def get_mock_result(provider: str, need: list[str]):
     if provider == "hunter":
         return {
@@ -160,7 +222,7 @@ def get_mock_latency(provider: str):
 def provider_supports(provider: str, need: list[str]):
     capabilities = {
         "hunter": ["verified_email", "vp_sales"],
-        "apollo": ["verified_email", "vp_sales"],
+        "apollo": ["vp_sales"],
         "pdl": ["employee_count"]
     }
 
@@ -176,7 +238,13 @@ def get_fallback_provider(provider: str):
     return "hunter"
 
 def is_live_provider(provider: str) -> bool:
-    return provider == "hunter"
+    if provider == "hunter":
+        return bool(HUNTER_API_KEY)
+
+    if provider == "apollo":
+        return bool(APOLLO_API_KEY)
+
+    return False
 
 def get_live_fallback_provider(provider: str, need: list[str]):
     fallback = get_fallback_provider(provider)
@@ -386,6 +454,7 @@ def enrich(request: EnrichmentRequest, _: None = Depends(verify_api_key)):
             )
 
     # IMPORTANT: this is OUTSIDE the max_latency block
+
     if provider == "hunter":
         try:
             result = call_hunter(request.domain)
@@ -420,7 +489,13 @@ def enrich(request: EnrichmentRequest, _: None = Depends(verify_api_key)):
                     }
                 )
 
-        if "vp_sales" in request.need:
+            provider = live_fallback
+            fallback_reason = "provider_unavailable"
+
+            if provider == "apollo":
+                result = call_apollo(request.domain)
+
+        if provider == "hunter" and "vp_sales" in request.need:
             sales_people = []
 
             for person in result.get("verified_emails", []):
@@ -438,7 +513,36 @@ def enrich(request: EnrichmentRequest, _: None = Depends(verify_api_key)):
 
             result = {
                 "vp_sales": sales_people
-    }
+            }
+
+    elif provider == "apollo":
+        try:
+            result = call_apollo(request.domain)
+
+        except Exception:
+            log_entry.update({
+                "status": "error",
+                "reason": "provider_unavailable",
+                "provider": "apollo",
+                "original_provider": original_provider,
+                "fallback_used": provider != original_provider,
+                "fallback_reason": fallback_reason,
+                "cost": 0,
+                "latency_ms": None,
+                "result": None,
+            })
+
+            save_request_to_db(log_entry)
+
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "status": "error",
+                    "provider": "apollo",
+                    "reason": "provider_unavailable"
+                }
+            )
+            
     else:
         result = get_mock_result(provider, request.need)
 
