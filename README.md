@@ -52,20 +52,19 @@ python -m pytest -v
 
 ## Provider reliability
 
-Agent Router currently includes live integrations for Hunter and Apollo.
+Agent Router currently includes live integrations for Hunter, Apollo, and PDL.
 
-PDL is still a mock integration used for development and testing.
+Current provider capabilities:
 
-Current live-provider behavior:
+- Hunter handles `verified_email` and `vp_sales`.
+- Apollo handles `vp_sales`.
+- PDL handles `employee_count`.
 
-- Hunter can handle `verified_email` and `vp_sales`.
-- Apollo can handle `vp_sales`.
-- If Hunter fails while processing a request that Apollo can support, Agent Router automatically falls back to Apollo.
-- If no live provider can safely handle the request, Agent Router returns:
+Agent Router can use live-provider fallback when another live provider can safely handle the same request.
 
-  - HTTP 502
-  - `reason: provider_unavailable`
+If no live provider can safely handle a request, Agent Router returns:
+
+- HTTP 502
+- `reason: provider_unavailable`
 
 Agent Router does not silently replace a failed live provider with mock data.
-
-PDL will be upgraded to a live integration before production launch.

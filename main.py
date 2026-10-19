@@ -183,7 +183,49 @@ def call_apollo(domain: str):
 
     return {
         "vp_sales": vp_sales
-    }    
+    }
+
+def call_pdl(domain: str):
+    if not PDL_API_KEY:
+        raise ValueError("PDL_API_KEY is not configured")
+
+    params = urllib.parse.urlencode({
+        "website": domain
+    })
+
+    url = f"https://api.peopledatalabs.com/v5/company/enrich?{params}"
+
+    request_obj = urllib.request.Request(
+        url,
+        headers={
+            "X-Api-Key": PDL_API_KEY,
+            "accept": "application/json",
+        },
+        method="GET",
+    )
+
+    try:
+        with urllib.request.urlopen(request_obj, timeout=10) as response:
+            data = json.loads(response.read().decode("utf-8"))
+
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(
+            f"PDL API returned HTTP {e.code}"
+        ) from e
+
+    except (urllib.error.URLError, TimeoutError) as e:
+        raise RuntimeError(
+            "PDL API connection failed or timed out"
+        ) from e
+
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise RuntimeError(
+            "PDL API returned an invalid response"
+        ) from e
+
+    return {
+        "employee_count": data.get("employee_count")
+    }      
 
 def get_mock_result(provider: str, need: list[str]):
     if provider == "hunter":
@@ -542,7 +584,35 @@ def enrich(request: EnrichmentRequest, _: None = Depends(verify_api_key)):
                     "reason": "provider_unavailable"
                 }
             )
-            
+
+    elif provider == "pdl":
+        try:
+            result = call_pdl(request.domain)
+
+        except Exception:
+            log_entry.update({
+                "status": "error",
+                "reason": "provider_unavailable",
+                "provider": "pdl",
+                "original_provider": original_provider,
+                "fallback_used": provider != original_provider,
+                "fallback_reason": fallback_reason,
+                "cost": 0,
+                "latency_ms": None,
+                "result": None,
+            })
+
+            save_request_to_db(log_entry)
+
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "status": "error",
+                    "provider": "pdl",
+                    "reason": "provider_unavailable"
+                }
+            )
+
     else:
         result = get_mock_result(provider, request.need)
 

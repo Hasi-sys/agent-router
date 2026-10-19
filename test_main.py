@@ -418,4 +418,154 @@ def test_hunter_falls_back_to_live_apollo(monkeypatch):
 
     assert data["provider"] == "apollo"
     assert data["fallback_used"] is True
-    assert data["result"]["vp_sales"][0]["name"] == "Fallback VP Sales"       
+    assert data["result"]["vp_sales"][0]["name"] == "Fallback VP Sales"
+
+def test_call_pdl_success(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "PDL_API_KEY", "test-key")
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            pass
+
+        def read(self):
+            return b'{"employee_count": 1234}'
+
+    def fake_urlopen(request_obj, timeout=10):
+        return FakeResponse()
+
+    monkeypatch.setattr(
+        main.urllib.request,
+        "urlopen",
+        fake_urlopen
+    )
+
+    result = main.call_pdl("example.com")
+
+    assert result["employee_count"] == 1234
+
+def test_call_pdl_missing_key(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "PDL_API_KEY", None)
+
+    try:
+        main.call_pdl("example.com")
+        assert False, "Expected ValueError"
+    except ValueError as e:
+        assert "PDL_API_KEY is not configured" in str(e)
+
+def test_call_pdl_http_error(monkeypatch):
+    import main
+    import urllib.error
+
+    monkeypatch.setattr(main, "PDL_API_KEY", "test-key")
+
+    def fake_urlopen(request_obj, timeout=10):
+        raise urllib.error.HTTPError(
+            url="https://example.com",
+            code=500,
+            msg="Server Error",
+            hdrs=None,
+            fp=None,
+        )
+
+    monkeypatch.setattr(
+        main.urllib.request,
+        "urlopen",
+        fake_urlopen
+    )
+
+    try:
+        main.call_pdl("example.com")
+        assert False, "Expected RuntimeError"
+    except RuntimeError as e:
+        assert "PDL API returned HTTP 500" in str(e)
+
+def test_call_pdl_connection_error(monkeypatch):
+    import main
+    import urllib.error
+
+    monkeypatch.setattr(main, "PDL_API_KEY", "test-key")
+
+    def fake_urlopen(request_obj, timeout=10):
+        raise urllib.error.URLError("connection failed")
+
+    monkeypatch.setattr(
+        main.urllib.request,
+        "urlopen",
+        fake_urlopen
+    )
+
+    try:
+        main.call_pdl("example.com")
+        assert False, "Expected RuntimeError"
+    except RuntimeError as e:
+        assert "PDL API connection failed or timed out" in str(e)
+
+def test_call_pdl_invalid_json(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "PDL_API_KEY", "test-key")
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            pass
+
+        def read(self):
+            return b"not-valid-json"
+
+    def fake_urlopen(request_obj, timeout=10):
+        return FakeResponse()
+
+    monkeypatch.setattr(
+        main.urllib.request,
+        "urlopen",
+        fake_urlopen
+    )
+
+    try:
+        main.call_pdl("example.com")
+        assert False, "Expected RuntimeError"
+    except RuntimeError as e:
+        assert "PDL API returned an invalid response" in str(e)
+
+def test_enrich_uses_live_pdl(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "PDL_API_KEY", "test-key")
+
+    called = {"pdl": False}
+
+    def fake_call_pdl(domain):
+        called["pdl"] = True
+        return {
+            "employee_count": 1234
+        }
+
+    monkeypatch.setattr(main, "call_pdl", fake_call_pdl)
+
+    response = client.post(
+        "/enrich",
+        headers={"x-api-key": os.getenv("ROUTER_API_KEY")},
+        json={
+            "domain": "stripe.com",
+            "need": ["employee_count"],
+            "max_cost": 1,
+            "max_latency_ms": 5000
+        }
+    )
+
+    assert response.status_code == 200
+    assert called["pdl"] is True
+
+    data = response.json()
+    assert data["provider"] == "pdl"
+    assert data["result"]["employee_count"] == 1234                                               
