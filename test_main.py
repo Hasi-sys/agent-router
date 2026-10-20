@@ -24,7 +24,7 @@ def test_version():
     assert response.json()["stage"] == "MVP"
 
 def test_config():
-    response = client.get("/config")
+    response = client.get("/config", headers={"x-api-key": os.getenv("ROUTER_API_KEY", "")})
 
     assert response.status_code == 200
     assert "hunter_configured" in response.json()

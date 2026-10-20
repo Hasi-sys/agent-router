@@ -801,7 +801,7 @@ def version():
     }
 
 @app.get("/config")
-def config():
+def config(_ = Depends(verify_api_key)):
     return {
         "hunter_configured": bool(HUNTER_API_KEY),
         "apollo_configured": bool(APOLLO_API_KEY),
