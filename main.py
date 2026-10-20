@@ -535,7 +535,17 @@ def enrich(request: EnrichmentRequest, _: None = Depends(verify_api_key)):
             fallback_reason = "provider_unavailable"
 
             if provider == "apollo":
-                result = call_apollo(request.domain)
+                try:
+                    result = call_apollo(request.domain)
+                except Exception:
+                    return JSONResponse(
+                        status_code=502,
+                        content={
+                            "status": "error",
+                            "provider": "apollo",
+                            "reason": "provider_unavailable",
+                        },
+                    )
 
         if provider == "hunter" and "vp_sales" in request.need:
             sales_people = []

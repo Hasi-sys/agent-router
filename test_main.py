@@ -568,4 +568,36 @@ def test_enrich_uses_live_pdl(monkeypatch):
 
     data = response.json()
     assert data["provider"] == "pdl"
-    assert data["result"]["employee_count"] == 1234                                               
+    assert data["result"]["employee_count"] == 1234
+
+def test_hunter_and_apollo_both_fail(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "HUNTER_API_KEY", "hunter-test-key")
+    monkeypatch.setattr(main, "APOLLO_API_KEY", "apollo-test-key")
+
+    def fake_hunter(domain):
+        raise RuntimeError("Hunter unavailable")
+
+    def fake_apollo(domain):
+        raise RuntimeError("Apollo unavailable")
+
+    monkeypatch.setattr(main, "call_hunter", fake_hunter)
+    monkeypatch.setattr(main, "call_apollo", fake_apollo)
+
+    response = client.post(
+        "/enrich",
+        headers={"x-api-key": os.getenv("ROUTER_API_KEY")},
+        json={
+            "domain": "stripe.com",
+            "need": ["vp_sales"],
+            "max_cost": 1,
+            "max_latency_ms": 5000,
+        },
+    )
+
+    assert response.status_code == 502
+    data = response.json()
+    assert data["status"] == "error"
+    assert data["provider"] == "apollo"
+    assert data["reason"] == "provider_unavailable"                                                   
