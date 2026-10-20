@@ -600,4 +600,73 @@ def test_hunter_and_apollo_both_fail(monkeypatch):
     data = response.json()
     assert data["status"] == "error"
     assert data["provider"] == "apollo"
-    assert data["reason"] == "provider_unavailable"                                                   
+    assert data["reason"] == "provider_unavailable"
+
+def test_pdl_missing_api_key(monkeypatch):
+    import main
+    import pytest
+
+    monkeypatch.setattr(main, "PDL_API_KEY", "")
+
+    with pytest.raises(ValueError, match="PDL_API_KEY is not configured"):
+        main.call_pdl("stripe.com")
+
+def test_pdl_successful_response(monkeypatch):
+    import main
+    import io
+    import json
+
+    monkeypatch.setattr(main, "PDL_API_KEY", "fake-test-key")
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def read(self):
+            return json.dumps({
+                "employee_count": 1234
+            }).encode("utf-8")
+
+    def fake_urlopen(request, timeout=10):
+        return FakeResponse()
+
+    monkeypatch.setattr(
+        main.urllib.request,
+        "urlopen",
+        fake_urlopen
+    )
+
+    result = main.call_pdl("stripe.com")
+
+    assert result == {"employee_count": 1234}
+
+def test_pdl_invalid_json_response(monkeypatch):
+    import main
+    import pytest
+
+    monkeypatch.setattr(main, "PDL_API_KEY", "fake-test-key")
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def read(self):
+            return b"invalid json"
+
+    monkeypatch.setattr(
+        main.urllib.request,
+        "urlopen",
+        lambda request, timeout=10: FakeResponse()
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="PDL API returned an invalid response"
+    ):
+        main.call_pdl("stripe.com")                                                                   

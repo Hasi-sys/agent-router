@@ -9,6 +9,7 @@ import os
 import urllib.request
 import urllib.parse
 import urllib.error
+import secrets
 from datetime import datetime, timezone
 
 load_dotenv(dotenv_path=".env", override=False)
@@ -21,8 +22,15 @@ PDL_API_KEY = os.getenv("PDL_API_KEY")
 ROUTER_API_KEY = os.getenv("ROUTER_API_KEY")
 
 def verify_api_key(x_api_key: str = Header(None)):
-    if not ROUTER_API_KEY or x_api_key != ROUTER_API_KEY:
-        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+    if (
+        not ROUTER_API_KEY
+        or not x_api_key
+        or not secrets.compare_digest(x_api_key, ROUTER_API_KEY)
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing API key"
+        )
 
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
