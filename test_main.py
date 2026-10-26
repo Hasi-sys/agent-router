@@ -611,6 +611,12 @@ def test_hunter_and_apollo_both_fail(monkeypatch):
     assert called["hunter"] is True
     assert called["apollo"] is True
 
+    saved = main.conn.execute(
+        "SELECT status, reason, provider, fallback_used FROM requests WHERE domain = 'stripe.com' AND provider = 'apollo' AND status = 'error' ORDER BY rowid DESC LIMIT 1"
+    ).fetchone()
+
+    assert saved == ("error", "provider_unavailable", "apollo", 1)   
+
 def test_pdl_missing_api_key(monkeypatch):
     import main
     import pytest
