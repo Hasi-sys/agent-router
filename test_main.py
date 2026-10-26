@@ -102,7 +102,7 @@ def test_enrich_latency_fallback(monkeypatch):
         json={
             "domain": "stripe.com",
             "need": ["vp_sales"],
-            "max_cost": 1,
+            "max_cost": 100,
             "max_latency_ms": 1000
         }
     )
@@ -572,14 +572,19 @@ def test_enrich_uses_live_pdl(monkeypatch):
 
 def test_hunter_and_apollo_both_fail(monkeypatch):
     import main
+    called = {"hunter": False, "apollo": False}
 
     monkeypatch.setattr(main, "HUNTER_API_KEY", "hunter-test-key")
     monkeypatch.setattr(main, "APOLLO_API_KEY", "apollo-test-key")
 
+    assert main.get_live_fallback_provider("hunter", ["vp_sales"]) == "apollo"
+
     def fake_hunter(domain):
+        called["hunter"] = True
         raise RuntimeError("Hunter unavailable")
 
     def fake_apollo(domain):
+        called["apollo"] = True
         raise RuntimeError("Apollo unavailable")
 
     monkeypatch.setattr(main, "call_hunter", fake_hunter)
@@ -591,16 +596,20 @@ def test_hunter_and_apollo_both_fail(monkeypatch):
         json={
             "domain": "stripe.com",
             "need": ["vp_sales"],
-            "max_cost": 1,
+            "max_cost": 100,
             "max_latency_ms": 5000,
         },
     )
+
+    print("DEBUG RESPONSE:", response.status_code, response.json())
 
     assert response.status_code == 502
     data = response.json()
     assert data["status"] == "error"
     assert data["provider"] == "apollo"
     assert data["reason"] == "provider_unavailable"
+    assert called["hunter"] is True
+    assert called["apollo"] is True
 
 def test_pdl_missing_api_key(monkeypatch):
     import main
