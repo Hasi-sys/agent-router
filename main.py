@@ -64,12 +64,11 @@ except sqlite3.OperationalError:
 
 app = FastAPI()
 
-
 class EnrichmentRequest(BaseModel):
-    domain: str
-    need: list[str] = Field(min_length=1)
-    max_cost: float | None = Field(default=None, gt=0)
-    max_latency_ms: int | None = Field(default=None, gt=0) 
+    domain: str = Field(..., examples=["stripe.com"])
+    need: list[str] = Field(..., min_length=1, examples=[["verified_email"]])
+    max_cost: float | None = Field(default=None, gt=0, examples=[100])
+    max_latency_ms: int | None = Field(default=None, gt=0, examples=[5000]) 
 
 def choose_provider(need: list[str]):
     if "verified_email" in need:
