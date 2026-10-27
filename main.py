@@ -662,7 +662,12 @@ def enrich(request: EnrichmentRequest, _: None = Depends(verify_api_key)):
             "latency_ms": latency_ms,
             "status": response_status
     }
-@app.get("/requests")
+@app.get(
+    "/requests",
+    responses={
+        401: {"description": "Invalid or missing API key"}
+    }
+)
 def get_requests(
     limit: int = Query(10, ge=1, le=100),
     _: None = Depends(verify_api_key)
