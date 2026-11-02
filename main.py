@@ -396,7 +396,48 @@ def call_pdl(domain: str):
 
     return {
         "employee_count": data.get("employee_count")
-    }      
+    }
+
+def execute_live_provider(provider: str, domain: str):
+    if provider == "hunter":
+        return call_hunter(domain)
+
+    if provider == "apollo":
+        return call_apollo(domain)
+
+    if provider == "pdl":
+        return call_pdl(domain)
+
+    raise ValueError(f"Unknown provider: {provider}")
+
+def provider_unavailable_response(
+    log_entry: dict,
+    provider: str,
+    original_provider: str,
+    fallback_reason,
+):
+    log_entry.update({
+        "status": "error",
+        "reason": "provider_unavailable",
+        "provider": provider,
+        "original_provider": original_provider,
+        "fallback_used": provider != original_provider,
+        "fallback_reason": fallback_reason,
+        "cost": 0,
+        "latency_ms": None,
+        "result": None,
+    })
+
+    save_request_to_db(log_entry)
+
+    return JSONResponse(
+        status_code=502,
+        content={
+            "status": "error",
+            "provider": provider,
+            "reason": "provider_unavailable",
+        },
+    )              
 
 def get_mock_result(provider: str, need: list[str]):
     if provider == "hunter":
@@ -710,7 +751,7 @@ def enrich(request: EnrichmentRequest, auth: dict = Depends(verify_api_key)):
 
     if provider == "hunter":
         try:
-            result = call_hunter(request.domain)
+            result = execute_live_provider(provider, request.domain)
 
         except Exception:
             live_fallback = get_live_fallback_provider(
@@ -719,35 +760,19 @@ def enrich(request: EnrichmentRequest, auth: dict = Depends(verify_api_key)):
             )
 
             if live_fallback is None:
-                log_entry.update({
-                    "status": "error",
-                    "reason": "provider_unavailable",
-                    "provider": "hunter",
-                    "original_provider": original_provider,
-                    "fallback_used": provider != original_provider,
-                    "fallback_reason": fallback_reason,
-                    "cost": 0,
-                    "latency_ms": None,
-                    "result": None,
-                })
-
-                save_request_to_db(log_entry)
-
-                return JSONResponse(
-                    status_code=502,
-                    content={
-                        "status": "error",
-                        "provider": "hunter",
-                        "reason": "provider_unavailable"
-                    }
-                )
-
+                return provider_unavailable_response(
+                    log_entry,
+                    provider,
+                    original_provider,
+                    fallback_reason,
+                )              
+            
             provider = live_fallback
             fallback_reason = "provider_unavailable"
 
             if provider == "apollo":
                 try:
-                    result = call_apollo(request.domain)
+                    result = execute_live_provider(provider, request.domain)
                 except Exception:
                     return JSONResponse(
                         status_code=502,
@@ -778,62 +803,16 @@ def enrich(request: EnrichmentRequest, auth: dict = Depends(verify_api_key)):
                 "vp_sales": sales_people
             }
 
-    elif provider == "apollo":
+    elif provider in ("apollo", "pdl"):
         try:
-            result = call_apollo(request.domain)
-
+            result = execute_live_provider(provider, request.domain)
         except Exception:
-            log_entry.update({
-                "status": "error",
-                "reason": "provider_unavailable",
-                "provider": "apollo",
-                "original_provider": original_provider,
-                "fallback_used": provider != original_provider,
-                "fallback_reason": fallback_reason,
-                "cost": 0,
-                "latency_ms": None,
-                "result": None,
-            })
-
-            save_request_to_db(log_entry)
-
-            return JSONResponse(
-                status_code=502,
-                content={
-                    "status": "error",
-                    "provider": "apollo",
-                    "reason": "provider_unavailable"
-                }
+            return provider_unavailable_response(
+                log_entry,
+                provider,
+                original_provider,
+                fallback_reason,
             )
-
-    elif provider == "pdl":
-        try:
-            result = call_pdl(request.domain)
-
-        except Exception:
-            log_entry.update({
-                "status": "error",
-                "reason": "provider_unavailable",
-                "provider": "pdl",
-                "original_provider": original_provider,
-                "fallback_used": provider != original_provider,
-                "fallback_reason": fallback_reason,
-                "cost": 0,
-                "latency_ms": None,
-                "result": None,
-            })
-
-            save_request_to_db(log_entry)
-
-            return JSONResponse(
-                status_code=502,
-                content={
-                    "status": "error",
-                    "provider": "pdl",
-                    "reason": "provider_unavailable"
-                }
-            )
-
     else:
         result = get_mock_result(provider, request.need)
 
