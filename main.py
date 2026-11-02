@@ -457,30 +457,35 @@ def get_mock_result(provider: str, need: list[str]):
     "mock": True,
     "message": "PDL integration not configured"
 }
+
+PROVIDER_CONFIG = {
+    "hunter": {
+        "cost": 0.05,
+        "latency_ms": 1200,
+        "capabilities": ["verified_email", "vp_sales"],
+    },
+    "apollo": {
+        "cost": 0.03,
+        "latency_ms": 800,
+        "capabilities": ["employee_count"],
+    },
+    "pdl": {
+        "cost": 0.08,
+        "latency_ms": 1800,
+        "capabilities": ["employee_count"],
+    },
+}
+
 def get_mock_cost(provider: str):
-    if provider == "hunter":
-        return 0.05
+    return PROVIDER_CONFIG.get(provider, {}).get("cost", 0.0)
 
-    if provider == "apollo":
-        return 0.03
 
-    return 0.08
 def get_mock_latency(provider: str):
-    if provider == "hunter":
-        return 1200
+    return PROVIDER_CONFIG.get(provider, {}).get("latency_ms", 1800)
 
-    if provider == "apollo":
-        return 800
-
-    return 1800
 def provider_supports(provider: str, need: list[str]):
-    capabilities = {
-        "hunter": ["verified_email", "vp_sales"],
-        "apollo": ["employee_count"],
-        "pdl": ["employee_count"]
-    }
-
-    return all(item in capabilities.get(provider, []) for item in need)
+    capabilities = PROVIDER_CONFIG.get(provider, {}).get("capabilities", [])
+    return all(item in capabilities for item in need)
 
 def get_fallback_provider(provider: str):
     if provider == "pdl":
