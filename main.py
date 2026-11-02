@@ -10,6 +10,7 @@ import urllib.request
 import urllib.parse
 import urllib.error
 import secrets
+import hashlib
 from datetime import datetime, timezone
 
 load_dotenv(dotenv_path=".env", override=False)
@@ -21,19 +22,169 @@ APOLLO_API_KEY = os.getenv("APOLLO_API_KEY")
 PDL_API_KEY = os.getenv("PDL_API_KEY")
 ROUTER_API_KEY = os.getenv("ROUTER_API_KEY")
 
+def hash_api_key(api_key: str) -> str:
+    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+
+def create_customer(name: str, monthly_limit: int = 1000) -> dict:
+    customer_id = str(uuid.uuid4())
+    raw_api_key = secrets.token_urlsafe(32)
+    api_key_hash = hash_api_key(raw_api_key)
+    created_at = datetime.now(timezone.utc).isoformat()
+
+    cursor.execute(
+        """
+        INSERT INTO customers (
+            customer_id,
+            name,
+            api_key_hash,
+            monthly_limit,
+            active,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, 1, ?)
+        """,
+        (
+            customer_id,
+            name,
+            api_key_hash,
+            monthly_limit,
+            created_at,
+        ),
+    )
+    conn.commit()
+
+    return {
+        "customer_id": customer_id,
+        "name": name,
+        "api_key": raw_api_key,
+        "monthly_limit": monthly_limit,
+        "created_at": created_at,
+    }
+
+def current_usage_period() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m")
+
+
+def get_customer_usage(customer_id: str) -> int:
+    period = current_usage_period()
+
+    row = conn.execute(
+        """
+        SELECT request_count
+        FROM customer_usage
+        WHERE customer_id = ? AND period = ?
+        """,
+        (customer_id, period),
+    ).fetchone()
+
+    return row[0] if row else 0
+
+def consume_customer_usage(customer_id: str, monthly_limit: int) -> int:
+    if monthly_limit <= 0:
+        raise HTTPException(
+            status_code=429,
+            detail="Monthly usage limit reached"
+        )
+
+    period = current_usage_period()
+
+    conn.execute(
+        """
+        INSERT INTO customer_usage (
+            customer_id,
+            period,
+            request_count
+        )
+        VALUES (?, ?, 0)
+        ON CONFLICT(customer_id, period) DO NOTHING
+        """,
+        (customer_id, period),
+    )
+
+    result = conn.execute(
+        """
+        UPDATE customer_usage
+        SET request_count = request_count + 1
+        WHERE customer_id = ?
+          AND period = ?
+          AND request_count < ?
+        """,
+        (customer_id, period, monthly_limit),
+    )
+
+    if result.rowcount != 1:
+        conn.rollback()
+        raise HTTPException(
+            status_code=429,
+            detail="Monthly usage limit reached"
+        )
+
+    conn.commit()
+
+    return get_customer_usage(customer_id)            
+
 def verify_api_key(x_api_key: str = Header(None)):
-    if (
-        not ROUTER_API_KEY
-        or not x_api_key
-        or not secrets.compare_digest(x_api_key, ROUTER_API_KEY)
-    ):
+    if not x_api_key:
         raise HTTPException(
             status_code=401,
             detail="Invalid or missing API key"
         )
 
+    if ROUTER_API_KEY and secrets.compare_digest(x_api_key, ROUTER_API_KEY):
+        return {
+            "type": "system",
+            "customer_id": None,
+            "name": "system"
+        }
+
+    api_key_hash = hash_api_key(x_api_key)
+
+    customer = cursor.execute(
+        """
+        SELECT customer_id, name, monthly_limit, active
+        FROM customers
+        WHERE api_key_hash = ?
+        """,
+        (api_key_hash,),
+    ).fetchone()
+
+    if not customer or customer[3] != 1:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or missing API key"
+        )
+
+    return {
+        "type": "customer",
+        "customer_id": customer[0],
+        "name": customer[1],
+        "monthly_limit": customer[2],
+    }
+
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS customers (
+    customer_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    api_key_hash TEXT NOT NULL UNIQUE,
+    monthly_limit INTEGER NOT NULL DEFAULT 1000,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS customer_usage (
+    customer_id TEXT NOT NULL,
+    period TEXT NOT NULL,
+    request_count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (customer_id, period),
+    FOREIGN KEY (customer_id) REFERENCES customers(customer_id)
+)
+""")
+
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS requests (
     request_id TEXT PRIMARY KEY,
@@ -352,7 +503,7 @@ def save_request_to_db(entry: dict):
     conn.commit()
 
 @app.post("/enrich")
-def enrich(request: EnrichmentRequest, _: None = Depends(verify_api_key)):
+def enrich(request: EnrichmentRequest, auth: dict = Depends(verify_api_key)):
     
     request_id = str(uuid.uuid4())
 
@@ -397,6 +548,12 @@ def enrich(request: EnrichmentRequest, _: None = Depends(verify_api_key)):
                 "reason": "empty_domain"
             }
         )
+
+    if auth["type"] == "customer":
+        consume_customer_usage(
+            auth["customer_id"],
+            auth["monthly_limit"],
+        )    
 
     provider = choose_provider(request.need)
 

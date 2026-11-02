@@ -68,3 +68,13 @@ If no live provider can safely handle a request, Agent Router returns:
 - `reason: provider_unavailable`
 
 Agent Router does not silently replace a failed live provider with mock data.
+
+## Customer API Keys and Usage Limits
+
+Agent Router supports customer-specific API keys in addition to the legacy system `ROUTER_API_KEY`.
+
+Customer API keys are generated as random secrets and only a SHA-256 hash is stored in the database. Raw customer API keys are returned only when the customer is created.
+
+Each customer has a configurable monthly request limit. Usage is tracked per customer and per UTC month. When the monthly limit is reached, `/enrich` returns HTTP 429.
+
+The legacy system `ROUTER_API_KEY` remains available for internal/system access and is not subject to customer quotas.

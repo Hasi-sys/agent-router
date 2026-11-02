@@ -1,10 +1,9 @@
 import os
+import pytest
 from dotenv import load_dotenv
-
-load_dotenv()
-
 from fastapi.testclient import TestClient
 from main import app
+from fastapi import HTTPException
 
 client = TestClient(app)
 
@@ -684,4 +683,184 @@ def test_pdl_invalid_json_response(monkeypatch):
         RuntimeError,
         match="PDL API returned an invalid response"
     ):
-        main.call_pdl("stripe.com")                                                                   
+        main.call_pdl("stripe.com")
+
+def test_customer_api_key_authentication():
+    import main
+
+    customer = main.create_customer("Customer Auth Test")
+
+    try:
+        auth = main.verify_api_key(customer["api_key"])
+
+        assert auth["type"] == "customer"
+        assert auth["customer_id"] == customer["customer_id"]
+        assert auth["name"] == "Customer Auth Test"
+        assert auth["monthly_limit"] == 1000
+    finally:
+        main.cursor.execute(
+            "DELETE FROM customers WHERE customer_id = ?",
+            (customer["customer_id"],),
+        )
+        main.conn.commit()
+
+
+def test_invalid_customer_api_key_rejected():
+    import main
+
+    with pytest.raises(HTTPException) as exc_info:
+        main.verify_api_key("definitely-not-a-valid-key")
+
+    assert exc_info.value.status_code == 401
+
+
+def test_inactive_customer_api_key_rejected():
+    import main
+
+    customer = main.create_customer("Inactive Customer")
+
+    try:
+        main.cursor.execute(
+            "UPDATE customers SET active = 0 WHERE customer_id = ?",
+            (customer["customer_id"],),
+        )
+        main.conn.commit()
+
+        with pytest.raises(HTTPException) as exc_info:
+            main.verify_api_key(customer["api_key"])
+
+        assert exc_info.value.status_code == 401
+    finally:
+        main.cursor.execute(
+            "DELETE FROM customers WHERE customer_id = ?",
+            (customer["customer_id"],),
+        )
+        main.conn.commit()
+
+
+def test_system_api_key_still_works(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "ROUTER_API_KEY", "system-test-key")
+
+    auth = main.verify_api_key("system-test-key")
+
+    assert auth["type"] == "system"
+    assert auth["customer_id"] is None
+    assert auth["name"] == "system"
+
+def test_customer_usage_limit_enforced():
+    import main
+
+    customer = main.create_customer("Usage Limit Test", monthly_limit=2)
+    customer_id = customer["customer_id"]
+
+    try:
+        assert main.consume_customer_usage(customer_id, 2) == 1
+        assert main.consume_customer_usage(customer_id, 2) == 2
+
+        with pytest.raises(HTTPException) as exc_info:
+            main.consume_customer_usage(customer_id, 2)
+
+        assert exc_info.value.status_code == 429
+        assert main.get_customer_usage(customer_id) == 2
+    finally:
+        main.cursor.execute(
+            "DELETE FROM customer_usage WHERE customer_id = ?",
+            (customer_id,),
+        )
+        main.cursor.execute(
+            "DELETE FROM customers WHERE customer_id = ?",
+            (customer_id,),
+        )
+        main.conn.commit()
+
+
+def test_customer_usage_isolated_between_customers():
+    import main
+
+    customer_a = main.create_customer("Usage Customer A", monthly_limit=2)
+    customer_b = main.create_customer("Usage Customer B", monthly_limit=2)
+
+    try:
+        main.consume_customer_usage(customer_a["customer_id"], 2)
+
+        assert main.get_customer_usage(customer_a["customer_id"]) == 1
+        assert main.get_customer_usage(customer_b["customer_id"]) == 0
+    finally:
+        for customer_id in (
+            customer_a["customer_id"],
+            customer_b["customer_id"],
+        ):
+            main.cursor.execute(
+                "DELETE FROM customer_usage WHERE customer_id = ?",
+                (customer_id,),
+            )
+            main.cursor.execute(
+                "DELETE FROM customers WHERE customer_id = ?",
+                (customer_id,),
+            )
+
+        main.conn.commit()
+
+def test_enrich_customer_quota_returns_429(monkeypatch):
+    import main
+
+    customer = main.create_customer("Quota Endpoint Test", monthly_limit=1)
+
+    try:
+        monkeypatch.setattr(main, "provider_supports", lambda provider, need: True)
+        monkeypatch.setattr(main, "choose_provider", lambda need: "hunter")
+        monkeypatch.setattr(
+            main,
+            "call_hunter",
+            lambda domain: {"data": {"domain": domain}},
+        )
+
+        headers = {"x-api-key": customer["api_key"]}
+        payload = {
+            "domain": "stripe.com",
+            "need": ["verified_email"],
+        }
+
+        first = client.post("/enrich", json=payload, headers=headers)
+        second = client.post("/enrich", json=payload, headers=headers)
+
+        assert first.status_code != 429
+        assert second.status_code == 429
+    finally:
+        main.cursor.execute(
+            "DELETE FROM customer_usage WHERE customer_id = ?",
+            (customer["customer_id"],),
+        )
+        main.cursor.execute(
+            "DELETE FROM customers WHERE customer_id = ?",
+            (customer["customer_id"],),
+        )
+        main.conn.commit()
+
+def test_system_api_key_not_subject_to_customer_quota(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "ROUTER_API_KEY", "system-unlimited-test-key")
+    monkeypatch.setattr(main, "provider_supports", lambda provider, need: True)
+    monkeypatch.setattr(main, "choose_provider", lambda need: "hunter")
+    monkeypatch.setattr(
+        main,
+        "call_hunter",
+        lambda domain: {"data": {"domain": domain}},
+    )
+
+    headers = {"x-api-key": "system-unlimited-test-key"}
+    payload = {
+        "domain": "stripe.com",
+        "need": ["verified_email"],
+    }
+
+    first = client.post("/enrich", json=payload, headers=headers)
+    second = client.post("/enrich", json=payload, headers=headers)
+    third = client.post("/enrich", json=payload, headers=headers)
+
+    assert first.status_code != 429
+    assert second.status_code != 429
+    assert third.status_code != 429                  
