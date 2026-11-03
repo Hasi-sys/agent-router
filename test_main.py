@@ -953,3 +953,92 @@ def test_apollo_missing_employee_count_returns_502(monkeypatch):
     )
 
     assert response.status_code == 502
+
+
+def test_apollo_live_routing_success(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "APOLLO_API_KEY", "test-key")
+    monkeypatch.setattr(
+        main, "choose_provider", lambda need: "apollo"
+    )
+    monkeypatch.setattr(
+        main,
+        "call_apollo",
+        lambda domain: {
+            "organization": {
+                "name": "Example Inc",
+                "employee_count": 125,
+            }
+        },
+    )
+
+    response = client.post(
+        "/enrich",
+        headers={"x-api-key": os.getenv("ROUTER_API_KEY")},
+        json={
+            "domain": "example.com",
+            "need": ["employee_count"],
+            "max_cost": 1,
+            "max_latency_ms": 5000,
+        },
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["provider"] == "apollo"
+    assert data["status"] == "success"
+    assert data["result"]["organization"]["employee_count"] == 125
+
+
+def test_apollo_outage_never_uses_mock(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "APOLLO_API_KEY", "test-key")
+    monkeypatch.setattr(
+        main, "choose_provider", lambda need: "apollo"
+    )
+
+    def failing_apollo(domain):
+        raise RuntimeError("Simulated Apollo outage")
+
+    monkeypatch.setattr(main, "call_apollo", failing_apollo)
+
+    mock_called = {"value": False}
+
+    def fake_mock(provider, need):
+        mock_called["value"] = True
+        return {"mock": True}
+
+    monkeypatch.setattr(main, "get_mock_result", fake_mock)
+
+    response = client.post(
+        "/enrich",
+        headers={"x-api-key": os.getenv("ROUTER_API_KEY")},
+        json={
+            "domain": "example.com",
+            "need": ["employee_count"],
+            "max_cost": 1,
+            "max_latency_ms": 5000,
+        },
+    )
+
+    assert response.status_code == 502
+    assert mock_called["value"] is False
+
+
+def test_no_incompatible_live_fallback(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "HUNTER_API_KEY", "test-key")
+    monkeypatch.setattr(main, "APOLLO_API_KEY", "test-key")
+    monkeypatch.setattr(main, "PDL_API_KEY", "")
+
+    assert main.get_live_fallback_provider(
+        "hunter", ["verified_email"]
+    ) is None
+
+    assert main.get_live_fallback_provider(
+        "apollo", ["employee_count"]
+    ) is None

@@ -64,3 +64,16 @@ Current provider behavior:
 - If no compatible live fallback is available, Agent Router returns HTTP 502 with `provider_unavailable`.
 - Mock data is not silently substituted for failed live providers.
 - Cost and latency constraints are enforced before provider execution.
+
+
+### Live provider coverage and fallback limitations
+
+- Hunter supports verified_email and vp_sales.
+- Apollo supports employee_count through live organization enrichment.
+- PDL remains unconfigured for live use.
+- Fallback selection requires a configured live provider that supports every requested capability.
+- Hunter and Apollo currently have no overlapping supported capabilities, so cross-provider failover is not yet available.
+- When a live provider fails and no compatible live fallback exists, Agent Router returns HTTP 502.
+- Failed live requests must never silently return mock data.
+- Apollo responses with missing organization or employee-count data currently return HTTP 502.
+- Automated tests simulate provider responses and failures without consuming provider API credits.
