@@ -100,3 +100,25 @@ The customer-isolation regression tests verify:
 - Historical unowned requests remain inaccessible to customers.
 
 Latest local verification: 48 automated tests passed.
+
+
+## Customer API-Key Rotation
+
+Agent Router supports secure customer API-key rotation.
+
+- New API keys are generated using `secrets.token_urlsafe(32)`.
+- Only the SHA-256 hash of the new key is stored.
+- The previous API key becomes invalid immediately after rotation.
+- Customer IDs, monthly limits, usage records, and request history are preserved.
+- Inactive and nonexistent customers cannot rotate API keys.
+- Rotation is currently an internal backend function, not a public API endpoint.
+- The new plaintext key must be delivered securely to the authorized customer.
+
+### Rotation Security Tests
+
+Automated tests verify:
+- Old-key invalidation and new-key authentication.
+- Rejection of inactive and nonexistent customers.
+- Preservation of monthly usage and request history.
+
+Latest local verification: 52 tests passed.

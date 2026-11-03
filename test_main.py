@@ -1165,3 +1165,127 @@ def test_customer_cannot_access_unowned_request():
             (customer["customer_id"],),
         )
         main.conn.commit()
+
+
+def test_customer_api_key_rotation():
+    import main
+    import pytest
+    from fastapi import HTTPException
+
+    customer = main.create_customer(
+        "Rotation Security Test",
+        monthly_limit=25,
+    )
+    customer_id = customer["customer_id"]
+    old_key = customer["api_key"]
+
+    try:
+        rotated = main.rotate_customer_api_key(customer_id)
+        new_key = rotated["api_key"]
+
+        assert new_key != old_key
+        assert rotated["customer_id"] == customer_id
+
+        with pytest.raises(HTTPException) as exc:
+            main.verify_api_key(old_key)
+
+        assert exc.value.status_code == 401
+
+        auth = main.verify_api_key(new_key)
+        assert auth["type"] == "customer"
+        assert auth["customer_id"] == customer_id
+        assert auth["monthly_limit"] == 25
+
+    finally:
+        main.cursor.execute(
+            "DELETE FROM customers WHERE customer_id = ?",
+            (customer_id,),
+        )
+        main.conn.commit()
+
+
+def test_api_key_rotation_rejects_inactive_customer():
+    import main
+    import pytest
+
+    customer = main.create_customer("Inactive Rotation Test")
+    customer_id = customer["customer_id"]
+
+    try:
+        main.cursor.execute(
+            "UPDATE customers SET active = 0 WHERE customer_id = ?",
+            (customer_id,),
+        )
+        main.conn.commit()
+
+        with pytest.raises(ValueError, match="Active customer not found"):
+            main.rotate_customer_api_key(customer_id)
+
+    finally:
+        main.cursor.execute(
+            "DELETE FROM customers WHERE customer_id = ?",
+            (customer_id,),
+        )
+        main.conn.commit()
+
+
+def test_api_key_rotation_rejects_unknown_customer():
+    import main
+    import pytest
+    import uuid
+
+    nonexistent_id = str(uuid.uuid4())
+
+    with pytest.raises(ValueError, match="Active customer not found"):
+        main.rotate_customer_api_key(nonexistent_id)
+
+
+def test_api_key_rotation_preserves_usage_and_history():
+    import main
+    import uuid
+
+    customer = main.create_customer(
+        "Rotation Preservation Test",
+        monthly_limit=25,
+    )
+    customer_id = customer["customer_id"]
+    request_id = "rotation-history-" + str(uuid.uuid4())
+
+    try:
+        assert main.consume_customer_usage(customer_id, 25) == 1
+
+        main.save_request_to_db({
+            "request_id": request_id,
+            "customer_id": customer_id,
+            "domain": "example.com",
+            "need": ["employee_count"],
+            "status": "success",
+            "created_at": "2026-11-03T12:00:00",
+        })
+
+        new_key = main.rotate_customer_api_key(customer_id)["api_key"]
+
+        assert main.get_customer_usage(customer_id) == 1
+
+        response = client.get(
+            f"/requests/{request_id}",
+            headers={"x-api-key": new_key},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["request_id"] == request_id
+
+    finally:
+        main.cursor.execute(
+            "DELETE FROM requests WHERE request_id = ?",
+            (request_id,),
+        )
+        main.cursor.execute(
+            "DELETE FROM customer_usage WHERE customer_id = ?",
+            (customer_id,),
+        )
+        main.cursor.execute(
+            "DELETE FROM customers WHERE customer_id = ?",
+            (customer_id,),
+        )
+        main.conn.commit()

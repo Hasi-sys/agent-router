@@ -61,6 +61,31 @@ def create_customer(name: str, monthly_limit: int = 1000) -> dict:
         "created_at": created_at,
     }
 
+
+def rotate_customer_api_key(customer_id: str) -> dict:
+    new_api_key = secrets.token_urlsafe(32)
+    new_api_key_hash = hash_api_key(new_api_key)
+
+    result = conn.execute(
+        """
+        UPDATE customers
+        SET api_key_hash = ?
+        WHERE customer_id = ? AND active = 1
+        """,
+        (new_api_key_hash, customer_id),
+    )
+
+    if result.rowcount != 1:
+        raise ValueError("Active customer not found")
+
+    conn.commit()
+
+    return {
+        "customer_id": customer_id,
+        "api_key": new_api_key,
+    }
+
+
 def current_usage_period() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m")
 
