@@ -1042,3 +1042,126 @@ def test_no_incompatible_live_fallback(monkeypatch):
     assert main.get_live_fallback_provider(
         "apollo", ["employee_count"]
     ) is None
+
+
+def test_customer_request_history_isolation():
+    import main
+
+    customer_a = main.create_customer("History Test A")
+    customer_b = main.create_customer("History Test B")
+
+    try:
+        request_id = "isolation-test-" + customer_a["customer_id"]
+
+        main.save_request_to_db({
+            "request_id": request_id,
+            "customer_id": customer_a["customer_id"],
+            "domain": "example.com",
+            "need": ["employee_count"],
+            "status": "success",
+            "created_at": "2026-11-03T12:00:00",
+        })
+
+        headers_a = {"x-api-key": customer_a["api_key"]}
+        headers_b = {"x-api-key": customer_b["api_key"]}
+
+        own = client.get(f"/requests/{request_id}", headers=headers_a)
+        other = client.get(f"/requests/{request_id}", headers=headers_b)
+        history_a = client.get("/requests?limit=100", headers=headers_a)
+        history_b = client.get("/requests?limit=100", headers=headers_b)
+
+        assert own.status_code == 200
+        assert other.status_code == 404
+        assert history_a.status_code == 200
+        assert history_b.status_code == 200
+        assert request_id in [r["request_id"] for r in history_a.json()]
+        assert request_id not in [r["request_id"] for r in history_b.json()]
+
+    finally:
+        main.cursor.execute(
+            "DELETE FROM requests WHERE request_id = ?",
+            (request_id,),
+        )
+        main.cursor.execute(
+            "DELETE FROM customers WHERE customer_id IN (?, ?)",
+            (customer_a["customer_id"], customer_b["customer_id"]),
+        )
+        main.conn.commit()
+
+
+def test_system_can_access_customer_request(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "ROUTER_API_KEY", "system-test-key")
+
+    customer = main.create_customer("System Access Test")
+    request_id = "system-test-" + customer["customer_id"]
+
+    try:
+        main.save_request_to_db({
+            "request_id": request_id,
+            "customer_id": customer["customer_id"],
+            "domain": "example.com",
+            "need": ["employee_count"],
+            "status": "success",
+            "created_at": "2026-11-03T12:00:00",
+        })
+
+        response = client.get(
+            f"/requests/{request_id}",
+            headers={"x-api-key": "system-test-key"},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["request_id"] == request_id
+
+    finally:
+        main.cursor.execute(
+            "DELETE FROM requests WHERE request_id = ?",
+            (request_id,),
+        )
+        main.cursor.execute(
+            "DELETE FROM customers WHERE customer_id = ?",
+            (customer["customer_id"],),
+        )
+        main.conn.commit()
+
+
+def test_customer_cannot_access_unowned_request():
+    import main
+    import uuid
+
+    customer = main.create_customer("Unowned History Test")
+    request_id = "unowned-test-" + str(uuid.uuid4())
+
+    try:
+        main.save_request_to_db({
+            "request_id": request_id,
+            "customer_id": None,
+            "domain": "example.com",
+            "need": ["employee_count"],
+            "status": "success",
+            "created_at": "2026-11-03T12:00:00",
+        })
+
+        headers = {"x-api-key": customer["api_key"]}
+
+        detail = client.get(f"/requests/{request_id}", headers=headers)
+        history = client.get("/requests?limit=100", headers=headers)
+
+        assert detail.status_code == 404
+        assert history.status_code == 200
+        assert request_id not in [
+            item["request_id"] for item in history.json()
+        ]
+
+    finally:
+        main.cursor.execute(
+            "DELETE FROM requests WHERE request_id = ?",
+            (request_id,),
+        )
+        main.cursor.execute(
+            "DELETE FROM customers WHERE customer_id = ?",
+            (customer["customer_id"],),
+        )
+        main.conn.commit()

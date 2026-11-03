@@ -213,6 +213,20 @@ try:
 except sqlite3.OperationalError:
     pass
 
+
+# Add customer ownership to requests without deleting existing data.
+request_columns = {
+    row[1]
+    for row in cursor.execute("PRAGMA table_info(requests)")
+}
+
+if "customer_id" not in request_columns:
+    cursor.execute(
+        "ALTER TABLE requests ADD COLUMN customer_id TEXT"
+    )
+    conn.commit()
+
+
 app = FastAPI()
 
 class EnrichmentRequest(BaseModel):
@@ -526,6 +540,7 @@ def save_request_to_db(entry: dict):
         """
         INSERT OR REPLACE INTO requests (
             request_id,
+            customer_id,
             domain,
             need,
             max_cost,
@@ -541,10 +556,13 @@ def save_request_to_db(entry: dict):
             result,
             created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+
         """,
         (
             entry.get("request_id"),
+            entry.get("customer_id"),
             entry.get("domain"),
             json.dumps(entry.get("need")),
             entry.get("max_cost"),
@@ -571,6 +589,7 @@ def enrich(request: EnrichmentRequest, auth: dict = Depends(verify_api_key)):
 
     log_entry = {
     "request_id": request_id,
+    "customer_id": auth.get("customer_id") if auth.get("type") == "customer" else None,
     "domain": request.domain,
     "need": request.need,
     "max_cost": request.max_cost,
@@ -874,7 +893,7 @@ def enrich(request: EnrichmentRequest, auth: dict = Depends(verify_api_key)):
 )
 def get_requests(
     limit: int = Query(10, ge=1, le=100),
-    _: None = Depends(verify_api_key)
+    auth: dict = Depends(verify_api_key),
 ):
     cursor.execute("""
         SELECT
@@ -893,10 +912,16 @@ def get_requests(
             latency_ms,
             result,
             created_at
-        FROM requests
-        ORDER BY created_at DESC
-        LIMIT ?
-    """, (limit,))
+
+            FROM requests
+            WHERE (? = 'system' OR customer_id = ?)
+            ORDER BY created_at DESC
+            LIMIT ?
+        """, (
+            auth["type"],
+            auth.get("customer_id"),
+            limit,
+        ))
 
     rows = cursor.fetchall()
 
@@ -924,7 +949,7 @@ def get_requests(
 @app.get("/requests/{request_id}")
 def get_request(
     request_id: str,
-    _: None = Depends(verify_api_key)
+    auth: dict = Depends(verify_api_key),
 ):
     cursor.execute("""
         SELECT
@@ -943,9 +968,15 @@ def get_request(
             latency_ms,
             result,
             created_at
-        FROM requests
-        WHERE request_id = ?
-    """, (request_id,))
+
+            FROM requests
+            WHERE request_id = ?
+            AND (? = 'system' OR customer_id = ?)
+            """, (
+                request_id,
+                auth["type"],
+                auth.get("customer_id"),
+            ))
 
     row = cursor.fetchone()
 

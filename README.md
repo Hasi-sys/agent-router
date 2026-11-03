@@ -77,3 +77,26 @@ Current provider behavior:
 - Failed live requests must never silently return mock data.
 - Apollo responses with missing organization or employee-count data currently return HTTP 502.
 - Automated tests simulate provider responses and failures without consuming provider API credits.
+
+
+## Customer Request Isolation
+
+Agent Router supports customer-level request ownership.
+
+- Each customer has a unique customer ID and API key.
+- New customer enrichment requests are associated with their customer ID.
+- GET /requests returns only the authenticated customer's requests.
+- GET /requests/{request_id} restricts access to the request owner.
+- Requests owned by other customers return HTTP 404.
+- Historical requests without customer ownership are hidden from customer accounts.
+- The system API key retains administrative access to request history.
+
+### Security Testing
+
+The customer-isolation regression tests verify:
+
+- Customer A cannot access Customer B's requests.
+- System administrator access remains available.
+- Historical unowned requests remain inaccessible to customers.
+
+Latest local verification: 48 automated tests passed.
