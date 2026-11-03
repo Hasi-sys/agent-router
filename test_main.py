@@ -37,7 +37,7 @@ def test_requests_requires_api_key():
     )
 
     assert response.status_code == 401
-    assert response.json()["detail"] == "Invalid or missing API key" 
+    assert response.json()["detail"] == "Invalid or missing API key"
 
 def test_request_not_found():
     response = client.get(
@@ -45,7 +45,7 @@ def test_request_not_found():
         headers={"x-api-key": "invalid-test-key"}
     )
 
-    assert response.status_code == 401  
+    assert response.status_code == 401
 
 def test_requests_without_api_key():
     response = client.get("/requests")
@@ -76,7 +76,7 @@ def test_enrich_rejects_impossible_constraints():
 
     assert response.status_code == 400
     assert response.json()["status"] == "rejected"
-    assert response.json()["reason"] == "no_valid_provider" 
+    assert response.json()["reason"] == "no_valid_provider"
 
 def test_enrich_latency_fallback(monkeypatch):
     import main
@@ -360,7 +360,7 @@ def test_call_apollo_request_payload(monkeypatch):
     assert parsed.path == "/api/v1/organizations/enrich"
     assert query["domain"] == ["example.com"]
     assert captured["method"] == "GET"
-    assert captured["headers"]["X-api-key"] == "test-key" 
+    assert captured["headers"]["X-api-key"] == "test-key"
 
 def test_enrich_uses_live_apollo(monkeypatch):
     import main
@@ -621,7 +621,7 @@ def test_pdl_and_apollo_both_fail(monkeypatch):
         "SELECT status, reason, provider, fallback_used FROM requests WHERE domain = 'stripe.com' AND provider = 'apollo' AND status = 'error' ORDER BY rowid DESC LIMIT 1"
     ).fetchone()
 
-    assert saved == ("error", "provider_unavailable", "apollo", 1)   
+    assert saved == ("error", "provider_unavailable", "apollo", 1)
 
 def test_pdl_missing_api_key(monkeypatch):
     import main
@@ -870,4 +870,86 @@ def test_system_api_key_not_subject_to_customer_quota(monkeypatch):
 
     assert first.status_code != 429
     assert second.status_code != 429
-    assert third.status_code != 429                  
+    assert third.status_code != 429
+
+def test_apollo_live_response_mapping(monkeypatch):
+    import io
+    import json
+    import main
+
+    monkeypatch.setattr(main, "APOLLO_API_KEY", "test-key")
+
+    payload = {
+        "organization": {
+            "name": "Example Inc",
+            "primary_domain": "example.com",
+            "estimated_num_employees": 125,
+        }
+    }
+
+    def fake_urlopen(*args, **kwargs):
+        return io.BytesIO(json.dumps(payload).encode("utf-8"))
+
+    monkeypatch.setattr(
+        main.urllib.request,
+        "urlopen",
+        fake_urlopen,
+    )
+
+    result = main.call_apollo("example.com")
+
+    assert result["organization"]["name"] == "Example Inc"
+    assert result["organization"]["employee_count"] == 125
+
+def test_apollo_missing_organization_returns_502(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "APOLLO_API_KEY", "test-key")
+    monkeypatch.setattr(main, "choose_provider", lambda need: "apollo")
+    monkeypatch.setattr(
+        main,
+        "call_apollo",
+        lambda domain: {"organization": None},
+    )
+
+    response = client.post(
+        "/enrich",
+        headers={"x-api-key": os.getenv("ROUTER_API_KEY")},
+        json={
+            "domain": "example.com",
+            "need": ["employee_count"],
+            "max_cost": 1,
+            "max_latency_ms": 5000,
+        },
+    )
+
+    assert response.status_code == 502
+
+def test_apollo_missing_employee_count_returns_502(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "APOLLO_API_KEY", "test-key")
+    monkeypatch.setattr(main, "choose_provider", lambda need: "apollo")
+    monkeypatch.setattr(
+        main,
+        "call_apollo",
+        lambda domain: {
+            "organization": {
+                "name": "Example Inc",
+                "employee_count": None,
+            }
+        },
+    )
+
+    response = client.post(
+        "/enrich",
+        headers={"x-api-key": os.getenv("ROUTER_API_KEY")},
+        json={
+            "domain": "example.com",
+            "need": ["employee_count"],
+            "max_cost": 1,
+            "max_latency_ms": 5000,
+        },
+    )
+
+    assert response.status_code == 502

@@ -121,7 +121,7 @@ def consume_customer_usage(customer_id: str, monthly_limit: int) -> int:
 
     conn.commit()
 
-    return get_customer_usage(customer_id)            
+    return get_customer_usage(customer_id)
 
 def verify_api_key(x_api_key: str = Header(None)):
     if not x_api_key:
@@ -219,7 +219,7 @@ class EnrichmentRequest(BaseModel):
     domain: str = Field(..., examples=["stripe.com"])
     need: list[str] = Field(..., min_length=1, examples=[["verified_email"]])
     max_cost: float | None = Field(default=None, gt=0, examples=[100])
-    max_latency_ms: int | None = Field(default=None, gt=0, examples=[5000]) 
+    max_latency_ms: int | None = Field(default=None, gt=0, examples=[5000])
 
 def choose_provider(need: list[str]):
     if "verified_email" in need:
@@ -232,7 +232,7 @@ def choose_provider(need: list[str]):
         return "pdl"
 
 def call_hunter(domain: str):
-    
+
     if not HUNTER_API_KEY:
         raise ValueError("HUNTER_API_KEY is not configured")
 
@@ -437,7 +437,7 @@ def provider_unavailable_response(
             "provider": provider,
             "reason": "provider_unavailable",
         },
-    )              
+    )
 
 def get_mock_result(provider: str, need: list[str]):
     if provider == "hunter":
@@ -495,7 +495,7 @@ def get_fallback_provider(provider: str):
         return "pdl"
 
     return "pdl"
-    
+
 def is_live_provider(provider: str) -> bool:
     if provider == "hunter":
         return bool(HUNTER_API_KEY)
@@ -518,7 +518,7 @@ def get_live_fallback_provider(provider: str, need: list[str]):
     ):
         return fallback
 
-    return None    
+    return None
 
 
 def save_request_to_db(entry: dict):
@@ -566,7 +566,7 @@ def save_request_to_db(entry: dict):
 
 @app.post("/enrich")
 def enrich(request: EnrichmentRequest, auth: dict = Depends(verify_api_key)):
-    
+
     request_id = str(uuid.uuid4())
 
     log_entry = {
@@ -615,12 +615,12 @@ def enrich(request: EnrichmentRequest, auth: dict = Depends(verify_api_key)):
         consume_customer_usage(
             auth["customer_id"],
             auth["monthly_limit"],
-        )    
+        )
 
     provider = choose_provider(request.need)
 
     if not provider_supports(provider, request.need):
-        
+
         log_entry.update({
             "status": "rejected",
             "reason": "unsupported_need"
@@ -645,7 +645,7 @@ def enrich(request: EnrichmentRequest, auth: dict = Depends(verify_api_key)):
 
     cost = get_mock_cost(provider)
     latency_ms = get_mock_latency(provider)
-    
+
     if request.max_cost is not None and cost > request.max_cost:
         if (
     fallback_cost <= request.max_cost
@@ -659,7 +659,7 @@ def enrich(request: EnrichmentRequest, auth: dict = Depends(verify_api_key)):
             fallback_reason = "cost"
             cost = fallback_cost
             latency_ms = fallback_latency_ms
-            
+
         else:
             log_entry.update({
                 "status": "rejected",
@@ -685,7 +685,7 @@ def enrich(request: EnrichmentRequest, auth: dict = Depends(verify_api_key)):
                     "max_cost": request.max_cost
                 }
             )
-    
+
     # ... cost/fallback logic above ...
 
     if request.max_latency_ms is not None and latency_ms > request.max_latency_ms:
@@ -770,8 +770,8 @@ def enrich(request: EnrichmentRequest, auth: dict = Depends(verify_api_key)):
                     provider,
                     original_provider,
                     fallback_reason,
-                )              
-            
+                )
+
             provider = live_fallback
             fallback_reason = "provider_unavailable"
 
@@ -811,6 +811,22 @@ def enrich(request: EnrichmentRequest, auth: dict = Depends(verify_api_key)):
     elif provider in ("apollo", "pdl"):
         try:
             result = execute_live_provider(provider, request.domain)
+
+            if provider == "apollo":
+                organization = (
+                    result.get("organization")
+                    if isinstance(result, dict)
+                    else None
+                )
+
+                if not isinstance(organization, dict) or organization.get("employee_count") is None:
+                    return provider_unavailable_response(
+                        log_entry,
+                        provider,
+                        original_provider,
+                        fallback_reason,
+                    )
+
         except Exception:
             return provider_unavailable_response(
                 log_entry,
@@ -818,9 +834,9 @@ def enrich(request: EnrichmentRequest, auth: dict = Depends(verify_api_key)):
                 original_provider,
                 fallback_reason,
             )
+
     else:
         result = get_mock_result(provider, request.need)
-
     response_status = "mock" if result.get("mock") is True else "success"
     log_entry.update({
         "status": response_status,
@@ -968,7 +984,7 @@ def health():
             "database": "connected",
             "db_path": DB_PATH
         }
-        
+
     except sqlite3.Error:
         raise HTTPException(
             status_code=500,
@@ -1060,7 +1076,7 @@ def get_stats(_: None = Depends(verify_api_key)):
         AND status != 'rejected'
     """)
     average_latency_ms = round(cursor.fetchone()[0], 2)
-               
+
     return {
         "status": "ok",
         "total_requests": total_requests,
@@ -1072,5 +1088,4 @@ def get_stats(_: None = Depends(verify_api_key)):
         "provider_usage": provider_usage,
         "estimated_total_cost": estimated_total_cost,
         "average_latency_ms": average_latency_ms
-    }    
-    
+    }
