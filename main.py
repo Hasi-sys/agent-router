@@ -12,6 +12,7 @@ import urllib.parse
 import urllib.error
 import secrets
 import hashlib
+from database import get_sqlite_connection
 from datetime import datetime, timezone
 
 load_dotenv(dotenv_path=".env", override=False)
@@ -188,7 +189,7 @@ def verify_api_key(x_api_key: str = Header(None)):
         "monthly_limit": customer[2],
     }
 
-conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+conn = get_sqlite_connection(DB_PATH)
 cursor = conn.cursor()
 
 cursor.execute("""

@@ -1544,3 +1544,17 @@ def test_admin_rotation_rolls_back_when_audit_fails(monkeypatch):
             (customer_id,),
         )
         main.conn.commit()
+
+def test_sqlite_connection_uses_explicit_path(tmp_path):
+    from database import get_sqlite_connection
+
+    db_file = tmp_path / "agent_router_test.db"
+    connection = get_sqlite_connection(str(db_file))
+
+    try:
+        result = connection.execute("SELECT 1").fetchone()
+
+        assert result[0] == 1
+        assert db_file.exists()
+    finally:
+        connection.close()
