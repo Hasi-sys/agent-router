@@ -122,3 +122,23 @@ Automated tests verify:
 - Preservation of monthly usage and request history.
 
 Latest local verification: 52 tests passed.
+
+
+### Administrator API-Key Rotation
+
+Endpoint: POST /admin/customers/{customer_id}/rotate-key
+
+- Requires the system administrator API key in the `x-api-key` header.
+- Customer API keys cannot access this endpoint (HTTP 403).
+- Missing or inactive customers return HTTP 404.
+- Successful rotation invalidates the previous key immediately.
+- The response contains the new API key, which must be delivered securely to the authorized customer.
+- Existing customer IDs, usage records, and request history are preserved.
+
+Security requirements before production use:
+- Enforce HTTPS.
+- Prevent caching of responses containing API keys.
+- Restrict distribution of the system administrator key.
+- Never log or expose plaintext API keys.
+- Add auditing for administrator key-rotation events.
+

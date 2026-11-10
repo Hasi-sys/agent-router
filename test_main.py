@@ -1289,3 +1289,258 @@ def test_api_key_rotation_preserves_usage_and_history():
             (customer_id,),
         )
         main.conn.commit()
+
+
+def test_customer_cannot_use_admin_rotation_endpoint():
+    import main
+
+    customer = main.create_customer("Admin Security Test")
+
+    try:
+        response = client.post(
+            f"/admin/customers/{customer['customer_id']}/rotate-key",
+            headers={"x-api-key": customer["api_key"]},
+        )
+
+        assert response.status_code == 403
+
+        # Unauthorized attempts must not invalidate the key.
+        auth = main.verify_api_key(customer["api_key"])
+        assert auth["customer_id"] == customer["customer_id"]
+
+    finally:
+        main.cursor.execute(
+            "DELETE FROM customers WHERE customer_id = ?",
+            (customer["customer_id"],),
+        )
+        main.conn.commit()
+
+
+def test_admin_can_rotate_customer_key(monkeypatch):
+    import main
+    import pytest
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(
+        main, "ROUTER_API_KEY", "rotation-admin-test-key"
+    )
+
+    customer = main.create_customer("Admin Rotation Test")
+    customer_id = customer["customer_id"]
+    old_key = customer["api_key"]
+
+    try:
+        response = client.post(
+            f"/admin/customers/{customer_id}/rotate-key",
+            headers={"x-api-key": "rotation-admin-test-key"},
+        )
+
+        assert response.status_code == 200
+
+        data = response.json()
+        assert data["customer_id"] == customer_id
+        assert data["api_key"] != old_key
+
+        with pytest.raises(HTTPException) as exc:
+            main.verify_api_key(old_key)
+
+        assert exc.value.status_code == 401
+
+        auth = main.verify_api_key(data["api_key"])
+        assert auth["customer_id"] == customer_id
+
+    finally:
+        main.cursor.execute(
+            "DELETE FROM customers WHERE customer_id = ?",
+            (customer_id,),
+        )
+        main.conn.commit()
+
+
+def test_admin_rotation_rejects_missing_and_inactive(monkeypatch):
+    import main
+    import uuid
+
+    monkeypatch.setattr(
+        main, "ROUTER_API_KEY", "rotation-admin-error-test-key"
+    )
+
+    headers = {"x-api-key": "rotation-admin-error-test-key"}
+    missing_id = str(uuid.uuid4())
+
+    missing = client.post(
+        f"/admin/customers/{missing_id}/rotate-key",
+        headers=headers,
+    )
+    assert missing.status_code == 404
+
+    customer = main.create_customer("Inactive Admin Rotation Test")
+    customer_id = customer["customer_id"]
+
+    try:
+        main.cursor.execute(
+            "UPDATE customers SET active = 0 WHERE customer_id = ?",
+            (customer_id,),
+        )
+        main.conn.commit()
+
+        inactive = client.post(
+            f"/admin/customers/{customer_id}/rotate-key",
+            headers=headers,
+        )
+        assert inactive.status_code == 404
+
+    finally:
+        main.cursor.execute(
+            "DELETE FROM customers WHERE customer_id = ?",
+            (customer_id,),
+        )
+        main.conn.commit()
+
+
+def test_admin_rotation_response_disables_caching(monkeypatch):
+    import main
+
+    monkeypatch.setattr(
+        main, "ROUTER_API_KEY", "cache-security-test-key"
+    )
+
+    customer = main.create_customer("Cache Security Test")
+    customer_id = customer["customer_id"]
+
+    try:
+        response = client.post(
+            f"/admin/customers/{customer_id}/rotate-key",
+            headers={"x-api-key": "cache-security-test-key"},
+        )
+
+        assert response.status_code == 200
+        assert response.headers["cache-control"] == "no-store"
+        assert response.headers["pragma"] == "no-cache"
+        assert "api_key" in response.json()
+
+    finally:
+        main.cursor.execute(
+            "DELETE FROM customers WHERE customer_id = ?",
+            (customer_id,),
+        )
+        main.conn.commit()
+
+
+def test_admin_rotation_creates_safe_audit_log(monkeypatch):
+    import main
+
+    monkeypatch.setattr(
+        main, "ROUTER_API_KEY", "audit-admin-test-key"
+    )
+
+    customer = main.create_customer("Audit Security Test")
+    customer_id = customer["customer_id"]
+
+    try:
+        response = client.post(
+            f"/admin/customers/{customer_id}/rotate-key",
+            headers={"x-api-key": "audit-admin-test-key"},
+        )
+
+        assert response.status_code == 200
+        new_key = response.json()["api_key"]
+
+        rows = main.conn.execute(
+            """
+            SELECT action, customer_id, actor, created_at
+            FROM admin_audit_logs
+            WHERE customer_id = ?
+            """,
+            (customer_id,),
+        ).fetchall()
+
+        assert len(rows) == 1
+        assert rows[0][0] == "customer_api_key_rotated"
+        assert rows[0][1] == customer_id
+        assert rows[0][2] == "system"
+        assert rows[0][3]
+
+        assert new_key not in repr(rows)
+        assert customer["api_key"] not in repr(rows)
+
+    finally:
+        main.conn.execute(
+            "DELETE FROM admin_audit_logs WHERE customer_id = ?",
+            (customer_id,),
+        )
+        main.conn.execute(
+            "DELETE FROM customers WHERE customer_id = ?",
+            (customer_id,),
+        )
+        main.conn.commit()
+
+
+def test_admin_rotation_rolls_back_when_audit_fails(monkeypatch):
+    import sqlite3
+    import main
+
+    monkeypatch.setattr(
+        main, "ROUTER_API_KEY", "rollback-admin-test-key"
+    )
+
+    customer = main.create_customer("Rollback Security Test")
+    customer_id = customer["customer_id"]
+    old_key = customer["api_key"]
+
+    try:
+        old_hash = main.conn.execute(
+            "SELECT api_key_hash FROM customers WHERE customer_id = ?",
+            (customer_id,),
+        ).fetchone()[0]
+
+        # Force the audit insert to fail without changing the schema.
+        main.conn.execute("""
+            CREATE TRIGGER fail_rotation_audit
+            BEFORE INSERT ON admin_audit_logs
+            BEGIN
+                SELECT RAISE(FAIL, 'simulated audit failure');
+            END;
+        """)
+        main.conn.commit()
+
+        try:
+            with pytest.raises(sqlite3.DatabaseError):
+                client.post(
+                    f"/admin/customers/{customer_id}/rotate-key",
+                    headers={"x-api-key": "rollback-admin-test-key"},
+                )
+        finally:
+            main.conn.execute(
+                "DROP TRIGGER IF EXISTS fail_rotation_audit"
+            )
+            main.conn.commit()
+
+        current_hash = main.conn.execute(
+            "SELECT api_key_hash FROM customers WHERE customer_id = ?",
+            (customer_id,),
+        ).fetchone()[0]
+
+        assert current_hash == old_hash
+        assert main.verify_api_key(old_key)["customer_id"] == customer_id
+
+        audit_count = main.conn.execute(
+            "SELECT COUNT(*) FROM admin_audit_logs WHERE customer_id = ?",
+            (customer_id,),
+        ).fetchone()[0]
+
+        assert audit_count == 0
+
+    finally:
+        main.conn.execute(
+            "DROP TRIGGER IF EXISTS fail_rotation_audit"
+        )
+        main.conn.execute(
+            "DELETE FROM admin_audit_logs WHERE customer_id = ?",
+            (customer_id,),
+        )
+        main.conn.execute(
+            "DELETE FROM customers WHERE customer_id = ?",
+            (customer_id,),
+        )
+        main.conn.commit()

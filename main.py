@@ -2,6 +2,7 @@ from fastapi import FastAPI, Query, HTTPException, Header, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
+from fastapi import Response
 import uuid
 import sqlite3
 import json
@@ -62,7 +63,9 @@ def create_customer(name: str, monthly_limit: int = 1000) -> dict:
     }
 
 
-def rotate_customer_api_key(customer_id: str) -> dict:
+def rotate_customer_api_key(
+    customer_id: str, *, commit: bool = True
+) -> dict:
     new_api_key = secrets.token_urlsafe(32)
     new_api_key_hash = hash_api_key(new_api_key)
 
@@ -78,17 +81,16 @@ def rotate_customer_api_key(customer_id: str) -> dict:
     if result.rowcount != 1:
         raise ValueError("Active customer not found")
 
-    conn.commit()
+    if commit:
+        conn.commit()
 
     return {
         "customer_id": customer_id,
         "api_key": new_api_key,
     }
 
-
 def current_usage_period() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m")
-
 
 def get_customer_usage(customer_id: str) -> int:
     period = current_usage_period()
@@ -197,6 +199,16 @@ CREATE TABLE IF NOT EXISTS customers (
     monthly_limit INTEGER NOT NULL DEFAULT 1000,
     active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS admin_audit_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    action TEXT NOT NULL,
+    customer_id TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 )
 """)
 
@@ -606,6 +618,47 @@ def save_request_to_db(entry: dict):
     )
 
     conn.commit()
+
+@app.post("/admin/customers/{customer_id}/rotate-key")
+def admin_rotate_customer_key(
+    customer_id: str,
+    response: Response,
+    auth: dict = Depends(verify_api_key),
+):
+    if auth["type"] != "system":
+        raise HTTPException(
+            status_code=403,
+            detail="System administrator access required",
+        )
+
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+
+    try:
+       
+        result = rotate_customer_api_key(customer_id, commit=False)
+
+        conn.execute(
+            """
+            INSERT INTO admin_audit_logs
+                (action, customer_id, actor)
+            VALUES (?, ?, ?)
+            """,
+            ("customer_api_key_rotated", customer_id, "system"),
+        )
+        conn.commit()
+
+        return result
+
+    except ValueError:
+        raise HTTPException(
+            status_code=404,
+            detail="Active customer not found",
+        )
+
+    except Exception:
+        conn.rollback()
+        raise
 
 @app.post("/enrich")
 def enrich(request: EnrichmentRequest, auth: dict = Depends(verify_api_key)):
