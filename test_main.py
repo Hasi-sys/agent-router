@@ -1558,3 +1558,67 @@ def test_sqlite_connection_uses_explicit_path(tmp_path):
         assert db_file.exists()
     finally:
         connection.close()
+
+def test_apollo_fallback_selects_live_pdl(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "APOLLO_API_KEY", "test-apollo-key")
+    monkeypatch.setattr(main, "PDL_API_KEY", "test-pdl-key")
+
+    fallback = main.get_live_fallback_provider(
+        "apollo",
+        ["employee_count"],
+    )
+
+    assert fallback == "pdl"
+
+def test_apollo_outage_recovers_with_live_pdl(monkeypatch):
+    import os
+    import main
+
+    monkeypatch.setattr(main, "APOLLO_API_KEY", "test-apollo-key")
+    monkeypatch.setattr(main, "PDL_API_KEY", "test-pdl-key")
+    monkeypatch.setattr(
+        main,
+        "choose_provider",
+        lambda need: "apollo",
+    )
+
+    calls = []
+
+    def fake_live_provider(provider, domain):
+        calls.append(provider)
+
+        if provider == "apollo":
+            raise RuntimeError("Simulated Apollo outage")
+
+        if provider == "pdl":
+            return {"employee_count": 125}
+
+        raise AssertionError("Unexpected provider")
+
+    monkeypatch.setattr(
+        main,
+        "execute_live_provider",
+        fake_live_provider,
+    )
+
+    response = client.post(
+        "/enrich",
+        headers={"x-api-key": os.getenv("ROUTER_API_KEY")},
+        json={
+            "domain": "example.com",
+            "need": ["employee_count"],
+            "max_cost": 1,
+            "max_latency_ms": 5000,
+        },
+    )
+
+    assert response.status_code == 200
+    assert calls == ["apollo", "pdl"]
+
+    data = response.json()
+    assert data["provider"] == "pdl"
+    assert data["original_provider"] == "apollo"
+    assert data["fallback_used"] is True
+    assert data["result"]["employee_count"] == 125

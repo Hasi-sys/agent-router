@@ -877,14 +877,29 @@ def enrich(request: EnrichmentRequest, auth: dict = Depends(verify_api_key)):
                 try:
                     result = execute_live_provider(provider, request.domain)
                 except Exception:
-                    return JSONResponse(
-                        status_code=502,
-                        content={
-                            "status": "error",
-                            "provider": "apollo",
-                            "reason": "provider_unavailable",
-                        },
-                    )
+                    if get_live_fallback_provider(provider, request.need) == "pdl":
+                        provider = "pdl"
+                        fallback_reason = "provider_unavailable"
+                        try:
+                            result = execute_live_provider(provider, request.domain)
+                        except Exception:
+                            return JSONResponse(
+                                status_code=502,
+                                content={
+                                    "status": "error",
+                                    "provider": "apollo",
+                                    "reason": "provider_unavailable",
+                                },
+                            )
+                    else:
+                        return JSONResponse(
+                            status_code=502,
+                            content={
+                                "status": "error",
+                                "provider": "apollo",
+                                "reason": "provider_unavailable",
+                            },
+                        )
 
         if provider == "hunter" and "vp_sales" in request.need:
             sales_people = []
@@ -917,22 +932,59 @@ def enrich(request: EnrichmentRequest, auth: dict = Depends(verify_api_key)):
                     else None
                 )
 
-                if not isinstance(organization, dict) or organization.get("employee_count") is None:
-                    return provider_unavailable_response(
-                        log_entry,
-                        provider,
-                        original_provider,
-                        fallback_reason,
-                    )
+                if (
+                    not isinstance(organization, dict)
+                    or organization.get("employee_count") is None
+                ):
+                    raise ValueError("Invalid Apollo response")
+
+            if provider == "pdl":
+                if (
+                    not isinstance(result, dict)
+                    or result.get("employee_count") is None
+                ):
+                    raise ValueError("Invalid PDL response")
 
         except Exception:
-            return provider_unavailable_response(
-                log_entry,
-                provider,
-                original_provider,
-                fallback_reason,
+            failed_provider = provider
+            live_fallback = get_live_fallback_provider(
+                failed_provider,
+                request.need,
             )
 
+            if live_fallback is None:
+                return provider_unavailable_response(
+                    log_entry,
+                    failed_provider,
+                    original_provider,
+                    "provider_unavailable",
+                )
+
+            try:
+                fallback_result = execute_live_provider(
+                    live_fallback,
+                    request.domain,
+                )
+
+                if live_fallback == "pdl":
+                    if (
+                        not isinstance(fallback_result, dict)
+                        or fallback_result.get("employee_count") is None
+                    ):
+                        raise ValueError("Invalid PDL fallback response")
+
+                result = fallback_result
+
+            except Exception:
+                return provider_unavailable_response(
+                    log_entry,
+                    failed_provider,
+                    original_provider,
+                    "provider_unavailable",
+                )
+
+            provider = live_fallback
+            fallback_reason = "provider_unavailable"
     else:
         result = get_mock_result(provider, request.need)
     response_status = "mock" if result.get("mock") is True else "success"
