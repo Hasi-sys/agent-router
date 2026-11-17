@@ -1840,3 +1840,19 @@ def test_postgres_sql_preserves_literal_question_marks():
     assert postgres_sql(sql) == (
         "SELECT 'Ready?' AS message WHERE customer_id = %s"
     )
+
+def test_postgres_table_exists():
+    from unittest.mock import MagicMock
+    from postgres_database import postgres_table_exists
+
+    connection = MagicMock()
+    connection.execute.return_value.fetchone.return_value = (True,)
+
+    result = postgres_table_exists(connection, "customers")
+
+    assert result is True
+    connection.execute.assert_called_once()
+
+    sql, parameters = connection.execute.call_args.args
+    assert "information_schema.tables" in sql
+    assert parameters == ("customers",)

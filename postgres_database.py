@@ -41,3 +41,19 @@ def postgres_sql(sql: str) -> str:
         i += 1
 
     return "".join(result)
+
+def postgres_table_exists(connection, table_name: str) -> bool:
+    """Check whether a table exists in the PostgreSQL public schema."""
+    row = connection.execute(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+              AND table_name = %s
+        )
+        """,
+        (table_name,),
+    ).fetchone()
+
+    return bool(row[0])
