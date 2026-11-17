@@ -1755,3 +1755,15 @@ def test_request_upsert_cannot_change_customer_owner():
             (customer_a["customer_id"], customer_b["customer_id"]),
         )
         main.conn.commit()
+
+def test_postgres_requires_database_url(monkeypatch):
+    import pytest
+    from postgres_database import get_postgres_connection
+
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    with pytest.raises(
+        ValueError,
+        match="DATABASE_URL is required for PostgreSQL",
+    ):
+        get_postgres_connection()
