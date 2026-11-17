@@ -18,6 +18,8 @@ from postgres_database import (
     create_postgres_customer,
     get_postgres_connection,
     get_postgres_customer_by_api_key_hash,
+    get_postgres_customer_usage,
+    consume_postgres_customer_usage,
 )
 from datetime import datetime, timezone
 
@@ -141,7 +143,14 @@ def current_usage_period() -> str:
 def get_customer_usage(customer_id: str) -> int:
     period = current_usage_period()
 
+    if DB_ENGINE == "postgres":
+        with get_postgres_connection() as pg_conn:
+            return get_postgres_customer_usage(
+                pg_conn, customer_id, period
+            )
+
     row = conn.execute(
+
         """
         SELECT request_count
         FROM customer_usage
@@ -160,6 +169,23 @@ def consume_customer_usage(customer_id: str, monthly_limit: int) -> int:
         )
 
     period = current_usage_period()
+
+    if DB_ENGINE == "postgres":
+        with get_postgres_connection() as pg_conn:
+            updated_count = consume_postgres_customer_usage(
+                pg_conn,
+                customer_id,
+                period,
+                monthly_limit,
+            )
+
+            if updated_count is None:
+                raise HTTPException(
+                    status_code=429,
+                    detail="Monthly usage limit reached",
+                )
+
+            return updated_count
 
     conn.execute(
         """

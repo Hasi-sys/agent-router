@@ -2072,3 +2072,231 @@ def test_postgres_rejects_inactive_customer_api_key(monkeypatch):
     fake_lookup.assert_called_once_with(
         pg_conn, main.hash_api_key("inactive-postgres-key")
     )
+
+def test_postgres_customer_usage_lookup():
+    from unittest.mock import MagicMock
+    from postgres_database import get_postgres_customer_usage
+
+    connection = MagicMock()
+
+    connection.execute.return_value.fetchone.return_value = (7,)
+
+    result = get_postgres_customer_usage(
+        connection, "customer-123", "2026-11"
+    )
+
+    assert result == 7
+
+    sql, parameters = connection.execute.call_args.args
+    assert "FROM customer_usage" in sql
+    assert parameters == ("customer-123", "2026-11")
+
+    connection.execute.return_value.fetchone.return_value = None
+
+    assert get_postgres_customer_usage(
+        connection, "customer-123", "2026-12"
+    ) == 0
+
+def test_postgres_atomic_quota_increment():
+    from unittest.mock import MagicMock
+    from postgres_database import consume_postgres_customer_usage
+
+    connection = MagicMock()
+    connection.execute.return_value.fetchone.return_value = (3,)
+
+    result = consume_postgres_customer_usage(
+        connection,
+        customer_id="customer-123",
+        period="2026-11",
+        monthly_limit=10,
+    )
+
+    assert result == 3
+
+    connection.execute.assert_called_once()
+
+    sql, parameters = connection.execute.call_args.args
+
+    assert "ON CONFLICT" in sql
+    assert "RETURNING request_count" in sql
+    assert parameters == ("customer-123", "2026-11", 10)
+
+def test_postgres_atomic_quota_exhausted():
+    from unittest.mock import MagicMock
+    from postgres_database import consume_postgres_customer_usage
+
+    connection = MagicMock()
+    connection.execute.return_value.fetchone.return_value = None
+
+    result = consume_postgres_customer_usage(
+        connection,
+        customer_id="customer-123",
+        period="2026-11",
+        monthly_limit=10,
+    )
+
+    assert result is None
+    connection.execute.assert_called_once()
+
+def test_postgres_quota_rejects_nonpositive_limits():
+    from unittest.mock import MagicMock
+    from postgres_database import consume_postgres_customer_usage
+
+    connection = MagicMock()
+
+    assert consume_postgres_customer_usage(
+        connection, "customer-123", "2026-11", 0
+    ) is None
+
+    assert consume_postgres_customer_usage(
+        connection, "customer-123", "2026-11", -1
+    ) is None
+
+    connection.execute.assert_not_called()
+
+def test_postgres_quota_concurrent_requests():
+    import os
+    import uuid
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import datetime, timezone
+
+    import pytest
+    from postgres_database import (
+        get_postgres_connection,
+        create_postgres_customer,
+        consume_postgres_customer_usage,
+    )
+
+    if os.getenv("RUN_POSTGRES_INTEGRATION") != "1":
+        pytest.skip("Requires explicit PostgreSQL integration testing")
+
+    customer_id = str(uuid.uuid4())
+    period = datetime.now(timezone.utc).strftime("%Y-%m")
+
+    def consume():
+        with get_postgres_connection() as connection:
+            return consume_postgres_customer_usage(
+                connection, customer_id, period, 2
+            )
+
+    with get_postgres_connection() as connection:
+        create_postgres_customer(
+            connection,
+            customer_id=customer_id,
+            name="Concurrency Test",
+            api_key_hash="test-" + customer_id,
+            created_at=datetime.now(timezone.utc).isoformat(),
+            monthly_limit=2,
+        )
+
+    try:
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            results = list(executor.map(lambda _: consume(), range(5)))
+
+        assert sorted(value for value in results if value is not None) == [1, 2]
+        assert results.count(None) == 3
+
+    finally:
+        with get_postgres_connection() as connection:
+            connection.execute(
+                "DELETE FROM customer_usage WHERE customer_id = %s",
+                (customer_id,),
+            )
+            connection.execute(
+                "DELETE FROM customers WHERE customer_id = %s",
+                (customer_id,),
+            )
+
+def test_get_customer_usage_uses_postgres(monkeypatch):
+    from unittest.mock import MagicMock
+    import main
+
+    pg_conn = MagicMock()
+    pg_context = MagicMock()
+    pg_context.__enter__.return_value = pg_conn
+
+    fake_connection = MagicMock(return_value=pg_context)
+    fake_usage = MagicMock(return_value=7)
+
+    monkeypatch.setattr(main, "DB_ENGINE", "postgres")
+    monkeypatch.setattr(
+        main, "get_postgres_connection", fake_connection
+    )
+    monkeypatch.setattr(
+        main, "get_postgres_customer_usage", fake_usage
+    )
+    monkeypatch.setattr(
+        main, "current_usage_period", lambda: "2026-11"
+    )
+
+    result = main.get_customer_usage("customer-123")
+
+    assert result == 7
+    fake_connection.assert_called_once()
+    fake_usage.assert_called_once_with(
+        pg_conn, "customer-123", "2026-11"
+    )
+
+def test_consume_customer_usage_uses_postgres(monkeypatch):
+    from unittest.mock import MagicMock
+    import main
+
+    pg_conn = MagicMock()
+    pg_context = MagicMock()
+    pg_context.__enter__.return_value = pg_conn
+
+    fake_connection = MagicMock(return_value=pg_context)
+    fake_consume = MagicMock(return_value=3)
+
+    monkeypatch.setattr(main, "DB_ENGINE", "postgres")
+    monkeypatch.setattr(
+        main, "get_postgres_connection", fake_connection
+    )
+    monkeypatch.setattr(
+        main, "consume_postgres_customer_usage", fake_consume
+    )
+    monkeypatch.setattr(
+        main, "current_usage_period", lambda: "2026-11"
+    )
+
+    result = main.consume_customer_usage("customer-123", 10)
+
+    assert result == 3
+    fake_connection.assert_called_once()
+    fake_consume.assert_called_once_with(
+        pg_conn, "customer-123", "2026-11", 10
+    )
+
+def test_consume_customer_usage_postgres_quota_exhausted(monkeypatch):
+    from unittest.mock import MagicMock
+    from fastapi import HTTPException
+    import pytest
+    import main
+
+    pg_conn = MagicMock()
+    pg_context = MagicMock()
+    pg_context.__enter__.return_value = pg_conn
+
+    fake_connection = MagicMock(return_value=pg_context)
+    fake_consume = MagicMock(return_value=None)
+
+    monkeypatch.setattr(main, "DB_ENGINE", "postgres")
+    monkeypatch.setattr(
+        main, "get_postgres_connection", fake_connection
+    )
+    monkeypatch.setattr(
+        main, "consume_postgres_customer_usage", fake_consume
+    )
+    monkeypatch.setattr(
+        main, "current_usage_period", lambda: "2026-11"
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        main.consume_customer_usage("customer-123", 10)
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.detail == "Monthly usage limit reached"
+
+    fake_consume.assert_called_once_with(
+        pg_conn, "customer-123", "2026-11", 10
+    )

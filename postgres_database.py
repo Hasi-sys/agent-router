@@ -91,3 +91,40 @@ def get_postgres_customer_by_api_key_hash(connection, api_key_hash):
         """,
         (api_key_hash,),
     ).fetchone()
+
+def get_postgres_customer_usage(connection, customer_id, period):
+    """Retrieve a customer's usage for a billing period."""
+    row = connection.execute(
+        """
+        SELECT request_count
+        FROM customer_usage
+        WHERE customer_id = %s AND period = %s
+        """,
+        (customer_id, period),
+    ).fetchone()
+
+    return row[0] if row else 0
+
+def consume_postgres_customer_usage(
+    connection, customer_id, period, monthly_limit
+):
+    """Atomically increment usage without exceeding the monthly limit."""
+    if monthly_limit <= 0:
+        return None
+
+    row = connection.execute(
+        """
+        INSERT INTO customer_usage (
+            customer_id, period, request_count
+        )
+        VALUES (%s, %s, 1)
+        ON CONFLICT (customer_id, period)
+        DO UPDATE SET
+            request_count = customer_usage.request_count + 1
+        WHERE customer_usage.request_count < %s
+        RETURNING request_count
+        """,
+        (customer_id, period, monthly_limit),
+    ).fetchone()
+
+    return row[0] if row else None
