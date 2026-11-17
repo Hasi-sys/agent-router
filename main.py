@@ -14,6 +14,10 @@ import secrets
 import hashlib
 import logging
 from database import get_sqlite_connection, ensure_request_columns
+from postgres_database import (
+    create_postgres_customer,
+    get_postgres_connection,
+)
 from datetime import datetime, timezone
 
 logger = logging.getLogger("agent_router")
@@ -54,7 +58,25 @@ def create_customer(name: str, monthly_limit: int = 1000) -> dict:
     raw_api_key = secrets.token_urlsafe(32)
     api_key_hash = hash_api_key(raw_api_key)
     created_at = datetime.now(timezone.utc).isoformat()
+    if DB_ENGINE == "postgres":
+        with get_postgres_connection() as pg_conn:
+            create_postgres_customer(
+                pg_conn,
+                customer_id=customer_id,
+                name=name,
+                api_key_hash=api_key_hash,
+                created_at=created_at,
+                monthly_limit=monthly_limit,
+            )
 
+        return {
+            "customer_id": customer_id,
+            "name": name,
+            "api_key": raw_api_key,
+            "monthly_limit": monthly_limit,
+            "created_at": created_at,
+        }
+        
     cursor.execute(
         """
         INSERT INTO customers (

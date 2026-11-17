@@ -1885,3 +1885,34 @@ def test_create_postgres_customer():
         500,
         "2026-11-17T12:00:00",
     )
+
+def test_create_customer_uses_postgres_when_selected(monkeypatch):
+    from unittest.mock import MagicMock
+    import main
+
+    pg_conn = MagicMock()
+    pg_context = MagicMock()
+    pg_context.__enter__.return_value = pg_conn
+
+    fake_connection = MagicMock(return_value=pg_context)
+    fake_insert = MagicMock()
+
+    monkeypatch.setattr(main, "DB_ENGINE", "postgres")
+    monkeypatch.setattr(
+        main, "get_postgres_connection", fake_connection
+    )
+    monkeypatch.setattr(
+        main, "create_postgres_customer", fake_insert
+    )
+
+    customer = main.create_customer("Postgres Branch Test")
+
+    fake_connection.assert_called_once()
+    fake_insert.assert_called_once()
+
+    assert fake_insert.call_args.kwargs["customer_id"] == customer["customer_id"]
+    assert fake_insert.call_args.kwargs["name"] == "Postgres Branch Test"
+    assert fake_insert.call_args.kwargs["api_key_hash"] == main.hash_api_key(
+        customer["api_key"]
+    )
+    assert customer["monthly_limit"] == 1000
