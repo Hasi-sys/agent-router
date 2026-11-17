@@ -1622,3 +1622,41 @@ def test_apollo_outage_recovers_with_live_pdl(monkeypatch):
     assert data["original_provider"] == "apollo"
     assert data["fallback_used"] is True
     assert data["result"]["employee_count"] == 125
+
+def test_request_migration_preserves_existing_data(tmp_path):
+    from database import (
+        get_sqlite_connection,
+        ensure_request_columns,
+    )
+
+    db_file = tmp_path / "migration_test.db"
+    connection = get_sqlite_connection(str(db_file))
+
+    try:
+        connection.execute(
+            "CREATE TABLE requests (request_id TEXT PRIMARY KEY)"
+        )
+        connection.execute(
+            "INSERT INTO requests (request_id) VALUES (?)",
+            ("existing-request-001",),
+        )
+        connection.commit()
+
+        ensure_request_columns(connection)
+        ensure_request_columns(connection)
+
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(requests)")
+        }
+
+        record = connection.execute(
+            "SELECT request_id FROM requests WHERE request_id = ?",
+            ("existing-request-001",),
+        ).fetchone()
+
+        assert {"created_at", "customer_id"}.issubset(columns)
+        assert record == ("existing-request-001",)
+
+    finally:
+        connection.close()

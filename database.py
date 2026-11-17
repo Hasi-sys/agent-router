@@ -14,3 +14,18 @@ def get_sqlite_connection(db_path: str | None = None) -> sqlite3.Connection:
     )
 
     return connection
+
+def ensure_request_columns(connection: sqlite3.Connection) -> None:
+    """Add missing request columns without deleting existing data."""
+    columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(requests)")
+    }
+
+    for column in ("created_at", "customer_id"):
+        if column not in columns:
+            connection.execute(
+                f"ALTER TABLE requests ADD COLUMN {column} TEXT"
+            )
+
+    connection.commit()

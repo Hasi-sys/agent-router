@@ -13,7 +13,7 @@ import urllib.error
 import secrets
 import hashlib
 import logging
-from database import get_sqlite_connection
+from database import get_sqlite_connection, ensure_request_columns
 from datetime import datetime, timezone
 
 logger = logging.getLogger("agent_router")
@@ -260,12 +260,7 @@ CREATE TABLE IF NOT EXISTS requests (
 
 conn.commit()
 
-try:
-    cursor.execute("ALTER TABLE requests ADD COLUMN created_at TEXT")
-    conn.commit()
-except sqlite3.OperationalError:
-    pass
-
+ensure_request_columns(conn)
 
 # Add customer ownership to requests without deleting existing data.
 request_columns = {
