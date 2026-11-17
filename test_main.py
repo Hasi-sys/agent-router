@@ -1856,3 +1856,32 @@ def test_postgres_table_exists():
     sql, parameters = connection.execute.call_args.args
     assert "information_schema.tables" in sql
     assert parameters == ("customers",)
+
+def test_create_postgres_customer():
+    from unittest.mock import MagicMock
+    from postgres_database import create_postgres_customer
+
+    connection = MagicMock()
+
+    create_postgres_customer(
+        connection,
+        customer_id="test-customer-123",
+        name="Test Customer",
+        api_key_hash="test-hash",
+        created_at="2026-11-17T12:00:00",
+        monthly_limit=500,
+    )
+
+    connection.execute.assert_called_once()
+
+    sql, parameters = connection.execute.call_args.args
+
+    assert "INSERT INTO customers" in sql
+    assert "%s" in sql
+    assert parameters == (
+        "test-customer-123",
+        "Test Customer",
+        "test-hash",
+        500,
+        "2026-11-17T12:00:00",
+    )

@@ -57,3 +57,26 @@ def postgres_table_exists(connection, table_name: str) -> bool:
     ).fetchone()
 
     return bool(row[0])
+
+def create_postgres_customer(connection, customer_id, name, api_key_hash, created_at, monthly_limit=1000):
+    """Insert a customer into PostgreSQL."""
+    connection.execute(
+        """
+        INSERT INTO customers (
+            customer_id,
+            name,
+            api_key_hash,
+            monthly_limit,
+            active,
+            created_at
+        )
+        VALUES (%s, %s, %s, %s, 1, %s)
+        """,
+        (
+            customer_id,
+            name,
+            api_key_hash,
+            monthly_limit,
+            created_at,
+        ),
+    )
