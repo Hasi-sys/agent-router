@@ -1916,3 +1916,159 @@ def test_create_customer_uses_postgres_when_selected(monkeypatch):
         customer["api_key"]
     )
     assert customer["monthly_limit"] == 1000
+
+def test_postgres_customer_lookup_by_api_key_hash():
+    from unittest.mock import MagicMock
+    from postgres_database import get_postgres_customer_by_api_key_hash
+
+    connection = MagicMock()
+    expected_customer = ("customer-123", "Test Customer", 1000, 1)
+
+    connection.execute.return_value.fetchone.return_value = expected_customer
+
+    result = get_postgres_customer_by_api_key_hash(
+        connection,
+        "hashed-api-key-123",
+    )
+
+    assert result == expected_customer
+    connection.execute.assert_called_once()
+
+    sql, parameters = connection.execute.call_args.args
+
+    assert "FROM customers" in sql
+    assert "WHERE api_key_hash = %s" in sql
+    assert parameters == ("hashed-api-key-123",)
+
+def test_postgres_customer_authentication(monkeypatch):
+    from unittest.mock import MagicMock
+    import main
+
+    api_key = "postgres-test-api-key"
+    customer_id = "postgres-test-customer"
+
+    pg_conn = MagicMock()
+    pg_context = MagicMock()
+    pg_context.__enter__.return_value = pg_conn
+
+    fake_connection = MagicMock(return_value=pg_context)
+    fake_lookup = MagicMock(
+        return_value=(customer_id, "Postgres Customer", 500, 1)
+    )
+
+    monkeypatch.setattr(main, "DB_ENGINE", "postgres")
+    monkeypatch.setattr(main, "ROUTER_API_KEY", None)
+    monkeypatch.setattr(
+        main, "get_postgres_connection", fake_connection
+    )
+    monkeypatch.setattr(
+        main, "get_postgres_customer_by_api_key_hash", fake_lookup
+    )
+
+    auth = main.verify_api_key(api_key)
+
+    assert auth["type"] == "customer"
+    assert auth["customer_id"] == customer_id
+    assert auth["name"] == "Postgres Customer"
+    assert auth["monthly_limit"] == 500
+
+    fake_lookup.assert_called_once_with(
+        pg_conn, main.hash_api_key(api_key)
+    )
+
+def test_postgres_rejects_invalid_customer_api_key(monkeypatch):
+    from unittest.mock import MagicMock
+    from fastapi import HTTPException
+    import pytest
+    import main
+
+    pg_conn = MagicMock()
+    pg_context = MagicMock()
+    pg_context.__enter__.return_value = pg_conn
+
+    fake_connection = MagicMock(return_value=pg_context)
+    fake_lookup = MagicMock(return_value=None)
+
+    monkeypatch.setattr(main, "DB_ENGINE", "postgres")
+    monkeypatch.setattr(main, "ROUTER_API_KEY", None)
+    monkeypatch.setattr(
+        main, "get_postgres_connection", fake_connection
+    )
+    monkeypatch.setattr(
+        main, "get_postgres_customer_by_api_key_hash", fake_lookup
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        main.verify_api_key("invalid-postgres-key")
+
+    assert exc_info.value.status_code == 401
+
+    fake_lookup.assert_called_once_with(
+        pg_conn, main.hash_api_key("invalid-postgres-key")
+    )
+
+def test_postgres_rejects_inactive_customer_api_key(monkeypatch):
+    from unittest.mock import MagicMock
+    from fastapi import HTTPException
+    import pytest
+    import main
+
+    pg_conn = MagicMock()
+    pg_context = MagicMock()
+    pg_context.__enter__.return_value = pg_conn
+
+    fake_connection = MagicMock(return_value=pg_context)
+    fake_lookup = MagicMock(
+        return_value=("customer-123", "Inactive Customer", 1000, 0)
+    )
+
+    monkeypatch.setattr(main, "DB_ENGINE", "postgres")
+    monkeypatch.setattr(main, "ROUTER_API_KEY", None)
+    monkeypatch.setattr(
+        main, "get_postgres_connection", fake_connection
+    )
+    monkeypatch.setattr(
+        main, "get_postgres_customer_by_api_key_hash", fake_lookup
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        main.verify_api_key("inactive-postgres-key")
+
+    assert exc_info.value.status_code == 401
+
+    fake_lookup.assert_called_once_with(
+        pg_conn, main.hash_api_key("inactive-postgres-key")
+    )
+
+def test_postgres_rejects_inactive_customer_api_key(monkeypatch):
+    from unittest.mock import MagicMock
+    from fastapi import HTTPException
+    import pytest
+    import main
+
+    pg_conn = MagicMock()
+    pg_context = MagicMock()
+    pg_context.__enter__.return_value = pg_conn
+
+    fake_connection = MagicMock(return_value=pg_context)
+    fake_lookup = MagicMock(
+        return_value=("customer-123", "Inactive Customer", 1000, 0)
+    )
+
+    monkeypatch.setattr(main, "DB_ENGINE", "postgres")
+    monkeypatch.setattr(main, "ROUTER_API_KEY", None)
+    monkeypatch.setattr(
+        main, "get_postgres_connection", fake_connection
+    )
+    monkeypatch.setattr(
+        main, "get_postgres_customer_by_api_key_hash", fake_lookup
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        main.verify_api_key("inactive-postgres-key")
+
+    assert exc_info.value.status_code == 401
+
+    fake_lookup.assert_called_once_with(
+        pg_conn, main.hash_api_key("inactive-postgres-key")
+    )

@@ -17,6 +17,7 @@ from database import get_sqlite_connection, ensure_request_columns
 from postgres_database import (
     create_postgres_customer,
     get_postgres_connection,
+    get_postgres_customer_by_api_key_hash,
 )
 from datetime import datetime, timezone
 
@@ -211,14 +212,21 @@ def verify_api_key(x_api_key: str = Header(None)):
 
     api_key_hash = hash_api_key(x_api_key)
 
-    customer = cursor.execute(
-        """
-        SELECT customer_id, name, monthly_limit, active
-        FROM customers
-        WHERE api_key_hash = ?
-        """,
-        (api_key_hash,),
-    ).fetchone()
+    if DB_ENGINE == "postgres":
+        with get_postgres_connection() as pg_conn:
+            customer = get_postgres_customer_by_api_key_hash(
+                pg_conn, api_key_hash
+            )
+    else:
+
+        customer = cursor.execute(
+            """
+            SELECT customer_id, name, monthly_limit, active
+            FROM customers
+            WHERE api_key_hash = ?
+            """,
+            (api_key_hash,),
+        ).fetchone()
 
     if not customer or customer[3] != 1:
         raise HTTPException(

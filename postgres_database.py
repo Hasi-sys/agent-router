@@ -80,3 +80,14 @@ def create_postgres_customer(connection, customer_id, name, api_key_hash, create
             created_at,
         ),
     )
+
+def get_postgres_customer_by_api_key_hash(connection, api_key_hash):
+    """Find a customer by hashed API key in PostgreSQL."""
+    return connection.execute(
+        """
+        SELECT customer_id, name, monthly_limit, active
+        FROM customers
+        WHERE api_key_hash = %s
+        """,
+        (api_key_hash,),
+    ).fetchone()
