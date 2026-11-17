@@ -495,6 +495,13 @@ def provider_unavailable_response(
         "result": None,
     })
 
+    logger.warning(
+        "provider_unavailable provider=%s original_provider=%s fallback_used=%s",
+        provider,
+        original_provider,
+        provider != original_provider,
+    )
+
     save_request_to_db(log_entry)
 
     return JSONResponse(
