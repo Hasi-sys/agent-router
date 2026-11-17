@@ -12,8 +12,23 @@ import urllib.parse
 import urllib.error
 import secrets
 import hashlib
+import logging
 from database import get_sqlite_connection
 from datetime import datetime, timezone
+
+logger = logging.getLogger("agent_router")
+logger.setLevel(logging.INFO)
+
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+        )
+    )
+    logger.addHandler(handler)
+
+logger.propagate = False
 
 load_dotenv(dotenv_path=".env", override=False)
 
