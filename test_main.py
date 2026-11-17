@@ -1787,3 +1787,56 @@ def test_postgres_connection_uses_database_url(monkeypatch):
 
     assert captured["url"] == database_url
     assert connection is fake_connection
+
+def test_database_engine_defaults_to_sqlite(monkeypatch):
+    import os
+    import subprocess
+    import sys
+
+    monkeypatch.delenv("AGENT_ROUTER_DB_ENGINE", raising=False)
+
+    result = subprocess.run(
+        [sys.executable, "-c", "import main; print(main.DB_ENGINE)"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert result.stdout.strip() == "sqlite"
+
+def test_database_engine_selects_postgres(monkeypatch):
+    import os
+    import subprocess
+    import sys
+
+    monkeypatch.setenv("AGENT_ROUTER_DB_ENGINE", "postgres")
+
+    result = subprocess.run(
+        [sys.executable, "-c", "import main; print(main.DB_ENGINE)"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert result.stdout.strip() == "postgres"
+
+def test_postgres_sql_converts_placeholders():
+    from postgres_database import postgres_sql
+
+    sql = "SELECT * FROM customers WHERE customer_id = ? AND active = ?"
+
+    result = postgres_sql(sql)
+
+    assert result == (
+        "SELECT * FROM customers "
+        "WHERE customer_id = %s AND active = %s"
+    )
+
+def test_postgres_sql_preserves_literal_question_marks():
+    from postgres_database import postgres_sql
+
+    sql = "SELECT 'Ready?' AS message WHERE customer_id = ?"
+
+    assert postgres_sql(sql) == (
+        "SELECT 'Ready?' AS message WHERE customer_id = %s"
+    )

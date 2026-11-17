@@ -34,6 +34,13 @@ load_dotenv(dotenv_path=".env", override=False)
 
 DB_PATH = os.getenv("AGENT_ROUTER_DB", "requests.db")
 
+DB_ENGINE = os.getenv("AGENT_ROUTER_DB_ENGINE", "sqlite").lower()
+
+if DB_ENGINE not in ("sqlite", "postgres"):
+    raise ValueError(
+        "AGENT_ROUTER_DB_ENGINE must be 'sqlite' or 'postgres'"
+    )
+
 HUNTER_API_KEY = os.getenv("HUNTER_API_KEY")
 APOLLO_API_KEY = os.getenv("APOLLO_API_KEY")
 PDL_API_KEY = os.getenv("PDL_API_KEY")
