@@ -262,19 +262,6 @@ conn.commit()
 
 ensure_request_columns(conn)
 
-# Add customer ownership to requests without deleting existing data.
-request_columns = {
-    row[1]
-    for row in cursor.execute("PRAGMA table_info(requests)")
-}
-
-if "customer_id" not in request_columns:
-    cursor.execute(
-        "ALTER TABLE requests ADD COLUMN customer_id TEXT"
-    )
-    conn.commit()
-
-
 app = FastAPI()
 
 class EnrichmentRequest(BaseModel):
