@@ -591,9 +591,21 @@ def get_live_fallback_provider(provider: str, need: list[str]):
 
 
 def save_request_to_db(entry: dict):
+
+    existing = conn.execute(
+        "SELECT customer_id FROM requests WHERE request_id = ?",
+        (entry.get("request_id"),),
+    ).fetchone()
+
+    if existing is not None:
+        if existing[0] != entry.get("customer_id"):
+            raise ValueError(
+                "Cannot change request customer ownership"
+            )
+
     cursor.execute(
         """
-        INSERT OR REPLACE INTO requests (
+        INSERT INTO requests (
             request_id,
             customer_id,
             domain,
@@ -613,6 +625,22 @@ def save_request_to_db(entry: dict):
         )
 
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+
+        ON CONFLICT(request_id) DO UPDATE SET
+            domain = excluded.domain,
+            need = excluded.need,
+            max_cost = excluded.max_cost,
+            max_latency_ms = excluded.max_latency_ms,
+            status = excluded.status,
+            reason = excluded.reason,
+            provider = excluded.provider,
+            original_provider = excluded.original_provider,
+            fallback_used = excluded.fallback_used,
+            fallback_reason = excluded.fallback_reason,
+            cost = excluded.cost,
+            latency_ms = excluded.latency_ms,
+            result = excluded.result
+        WHERE requests.customer_id IS excluded.customer_id
 
         """,
         (

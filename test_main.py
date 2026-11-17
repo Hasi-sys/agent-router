@@ -1660,3 +1660,98 @@ def test_request_migration_preserves_existing_data(tmp_path):
 
     finally:
         connection.close()
+
+def test_request_update_preserves_customer_ownership():
+    import uuid
+    import main
+
+    customer = main.create_customer("Upsert Ownership Test")
+    request_id = "upsert-test-" + uuid.uuid4().hex
+
+    try:
+        main.save_request_to_db({
+            "request_id": request_id,
+            "customer_id": customer["customer_id"],
+            "domain": "example.com",
+            "need": ["employee_count"],
+            "status": "pending",
+            "created_at": "2026-11-16T12:00:00",
+        })
+
+        main.save_request_to_db({
+            "request_id": request_id,
+            "customer_id": customer["customer_id"],
+            "domain": "example.com",
+            "need": ["employee_count"],
+            "status": "success",
+            "result": {"employee_count": 125},
+            "created_at": "2026-11-16T12:00:00",
+        })
+
+        row = main.conn.execute(
+            """
+            SELECT customer_id, status, COUNT(*)
+            FROM requests
+            WHERE request_id = ?
+            """,
+            (request_id,),
+        ).fetchone()
+
+        assert row == (customer["customer_id"], "success", 1)
+
+    finally:
+        main.conn.execute(
+            "DELETE FROM requests WHERE request_id = ?",
+            (request_id,),
+        )
+        main.conn.execute(
+            "DELETE FROM customers WHERE customer_id = ?",
+            (customer["customer_id"],),
+        )
+        main.conn.commit()
+
+def test_request_upsert_cannot_change_customer_owner():
+    import uuid
+    import main
+
+    customer_a = main.create_customer("Upsert Owner A")
+    customer_b = main.create_customer("Upsert Owner B")
+    request_id = "ownership-" + uuid.uuid4().hex
+
+    try:
+        main.save_request_to_db({
+            "request_id": request_id,
+            "customer_id": customer_a["customer_id"],
+            "domain": "example.com",
+            "need": ["employee_count"],
+            "status": "pending",
+        })
+
+        try:
+            main.save_request_to_db({
+                "request_id": request_id,
+                "customer_id": customer_b["customer_id"],
+                "domain": "example.com",
+                "need": ["employee_count"],
+                "status": "success",
+            })
+        except ValueError:
+            pass
+
+        row = main.conn.execute(
+            "SELECT customer_id FROM requests WHERE request_id = ?",
+            (request_id,),
+        ).fetchone()
+
+        assert row == (customer_a["customer_id"],)
+
+    finally:
+        main.conn.execute(
+            "DELETE FROM requests WHERE request_id = ?",
+            (request_id,),
+        )
+        main.conn.execute(
+            "DELETE FROM customers WHERE customer_id IN (?, ?)",
+            (customer_a["customer_id"], customer_b["customer_id"]),
+        )
+        main.conn.commit()
