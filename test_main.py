@@ -1767,3 +1767,23 @@ def test_postgres_requires_database_url(monkeypatch):
         match="DATABASE_URL is required for PostgreSQL",
     ):
         get_postgres_connection()
+
+def test_postgres_connection_uses_database_url(monkeypatch):
+    import psycopg
+    from postgres_database import get_postgres_connection
+
+    database_url = "postgresql://test:test@localhost:5432/testdb"
+    fake_connection = object()
+    captured = {}
+
+    def fake_connect(url):
+        captured["url"] = url
+        return fake_connection
+
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    monkeypatch.setattr(psycopg, "connect", fake_connect)
+
+    connection = get_postgres_connection()
+
+    assert captured["url"] == database_url
+    assert connection is fake_connection
