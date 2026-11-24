@@ -128,3 +128,33 @@ def consume_postgres_customer_usage(
     ).fetchone()
 
     return row[0] if row else None
+
+def rotate_postgres_customer_api_key(
+    connection, customer_id: str, new_api_key_hash: str
+) -> None:
+    """Update an active customer's API-key hash."""
+    result = connection.execute(
+        """
+        UPDATE customers
+        SET api_key_hash = %s
+        WHERE customer_id = %s AND active = 1
+        """,
+        (new_api_key_hash, customer_id),
+    )
+
+    if result.rowcount != 1:
+        raise ValueError("Active customer not found")
+
+def insert_postgres_admin_audit_log(
+    connection, action: str, customer_id: str, actor: str
+) -> None:
+    """Record an administrative action in the current transaction."""
+    connection.execute(
+        """
+        INSERT INTO admin_audit_logs (
+            action, customer_id, actor
+        )
+        VALUES (%s, %s, %s)
+        """,
+        (action, customer_id, actor),
+    )

@@ -20,6 +20,8 @@ from postgres_database import (
     get_postgres_customer_by_api_key_hash,
     get_postgres_customer_usage,
     consume_postgres_customer_usage,
+    rotate_postgres_customer_api_key,
+    insert_postgres_admin_audit_log,
 )
 from datetime import datetime, timezone
 
@@ -79,7 +81,7 @@ def create_customer(name: str, monthly_limit: int = 1000) -> dict:
             "monthly_limit": monthly_limit,
             "created_at": created_at,
         }
-        
+
     cursor.execute(
         """
         INSERT INTO customers (
@@ -730,8 +732,38 @@ def admin_rotate_customer_key(
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
 
+    if DB_ENGINE == "postgres":
+        new_api_key = secrets.token_urlsafe(32)
+        new_api_key_hash = hash_api_key(new_api_key)
+
+        try:
+            with get_postgres_connection() as pg_conn:
+                rotate_postgres_customer_api_key(
+                    pg_conn,
+                    customer_id,
+                    new_api_key_hash,
+                )
+
+                insert_postgres_admin_audit_log(
+                    pg_conn,
+                    action="customer_api_key_rotated",
+                    customer_id=customer_id,
+                    actor="system",
+                )
+
+        except ValueError:
+            raise HTTPException(
+                status_code=404,
+                detail="Active customer not found",
+            )
+
+        return {
+            "customer_id": customer_id,
+            "api_key": new_api_key,
+        }
+
     try:
-       
+
         result = rotate_customer_api_key(customer_id, commit=False)
 
         conn.execute(

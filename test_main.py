@@ -2300,3 +2300,210 @@ def test_consume_customer_usage_postgres_quota_exhausted(monkeypatch):
     fake_consume.assert_called_once_with(
         pg_conn, "customer-123", "2026-11", 10
     )
+
+def test_rotate_postgres_customer_api_key():
+    from unittest.mock import MagicMock
+    from postgres_database import rotate_postgres_customer_api_key
+
+    connection = MagicMock()
+    connection.execute.return_value.rowcount = 1
+
+    rotate_postgres_customer_api_key(
+        connection,
+        "customer-123",
+        "new-hashed-api-key",
+    )
+
+    connection.execute.assert_called_once()
+
+    sql, parameters = connection.execute.call_args.args
+
+    assert "UPDATE customers" in sql
+    assert "active = 1" in sql
+    assert parameters == (
+        "new-hashed-api-key",
+        "customer-123",
+    )
+
+    connection.commit.assert_not_called()
+
+def test_rotate_postgres_customer_api_key_rejects_missing_or_inactive():
+    from unittest.mock import MagicMock
+    import pytest
+    from postgres_database import rotate_postgres_customer_api_key
+
+    connection = MagicMock()
+    connection.execute.return_value.rowcount = 0
+
+    with pytest.raises(
+        ValueError, match="Active customer not found"
+    ):
+        rotate_postgres_customer_api_key(
+            connection,
+            "inactive-or-missing-customer",
+            "new-hashed-api-key",
+        )
+
+    connection.commit.assert_not_called()
+
+def test_insert_postgres_admin_audit_log():
+    from unittest.mock import MagicMock
+    from postgres_database import insert_postgres_admin_audit_log
+
+    connection = MagicMock()
+
+    insert_postgres_admin_audit_log(
+        connection,
+        action="customer_api_key_rotated",
+        customer_id="customer-123",
+        actor="system",
+    )
+
+    connection.execute.assert_called_once()
+
+    sql, parameters = connection.execute.call_args.args
+
+    assert "INSERT INTO admin_audit_logs" in sql
+    assert parameters == (
+        "customer_api_key_rotated",
+        "customer-123",
+        "system",
+    )
+
+    connection.commit.assert_not_called()
+    connection.rollback.assert_not_called()
+
+def test_admin_postgres_rotation_creates_audit_log(monkeypatch):
+    from unittest.mock import MagicMock
+    from fastapi import Response
+    import main
+
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.execute.return_value.rowcount = 1
+
+    monkeypatch.setattr(main, "DB_ENGINE", "postgres")
+    monkeypatch.setattr(
+        main,
+        "get_postgres_connection",
+        lambda: connection,
+    )
+
+    response = Response()
+
+    result = main.admin_rotate_customer_key(
+        customer_id="customer-123",
+        response=response,
+        auth={"type": "system"},
+    )
+
+    assert result["customer_id"] == "customer-123"
+    assert result["api_key"]
+
+    calls = connection.execute.call_args_list
+    assert len(calls) == 2
+
+    update_sql, update_params = calls[0].args
+    audit_sql, audit_params = calls[1].args
+
+    assert "UPDATE customers" in update_sql
+    assert update_params == (
+        main.hash_api_key(result["api_key"]),
+        "customer-123",
+    )
+
+    assert "INSERT INTO admin_audit_logs" in audit_sql
+    assert audit_params == (
+        "customer_api_key_rotated",
+        "customer-123",
+        "system",
+    )
+
+    assert response.headers["Cache-Control"] == "no-store"
+
+    connection.__exit__.assert_called_once_with(
+        None, None, None
+    )
+
+def test_admin_postgres_rotation_rolls_back_when_audit_fails(
+    monkeypatch,
+):
+    from unittest.mock import MagicMock
+    from fastapi import Response
+    import pytest
+    import main
+
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+
+    update_result = MagicMock()
+    update_result.rowcount = 1
+
+    connection.execute.side_effect = [
+        update_result,
+        RuntimeError("Audit insert failed"),
+    ]
+
+    monkeypatch.setattr(main, "DB_ENGINE", "postgres")
+    monkeypatch.setattr(
+        main,
+        "get_postgres_connection",
+        lambda: connection,
+    )
+
+    with pytest.raises(
+        RuntimeError, match="Audit insert failed"
+    ):
+        main.admin_rotate_customer_key(
+            customer_id="customer-123",
+            response=Response(),
+            auth={"type": "system"},
+        )
+
+    assert connection.execute.call_count == 2
+
+    connection.__exit__.assert_called_once()
+
+    exception_type, exception, traceback = (
+        connection.__exit__.call_args.args
+    )
+
+    assert exception_type is RuntimeError
+    assert str(exception) == "Audit insert failed"
+
+    connection.commit.assert_not_called()
+
+def test_admin_postgres_rotation_rejects_missing_customer(
+    monkeypatch,
+):
+    from unittest.mock import MagicMock
+    from fastapi import Response, HTTPException
+    import pytest
+    import main
+
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.execute.return_value.rowcount = 0
+
+    monkeypatch.setattr(main, "DB_ENGINE", "postgres")
+    monkeypatch.setattr(
+        main,
+        "get_postgres_connection",
+        lambda: connection,
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        main.admin_rotate_customer_key(
+            customer_id="missing-customer",
+            response=Response(),
+            auth={"type": "system"},
+        )
+
+    assert exc.value.status_code == 404
+    assert exc.value.detail == "Active customer not found"
+
+    connection.execute.assert_called_once()
+    connection.commit.assert_not_called()
+
+    connection.__exit__.assert_called_once()
+    assert connection.__exit__.call_args.args[0] is ValueError
