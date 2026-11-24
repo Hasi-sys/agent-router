@@ -2507,3 +2507,108 @@ def test_admin_postgres_rotation_rejects_missing_customer(
 
     connection.__exit__.assert_called_once()
     assert connection.__exit__.call_args.args[0] is ValueError
+
+def test_save_postgres_request():
+    from unittest.mock import MagicMock
+    from postgres_database import save_postgres_request
+    import json
+
+    connection = MagicMock()
+    connection.execute.return_value.rowcount = 1
+
+    entry = {
+        "request_id": "test-request-001",
+        "customer_id": "customer-001",
+        "domain": "example.com",
+        "need": ["employee_count"],
+        "status": "success",
+        "provider": "apollo",
+        "fallback_used": False,
+        "result": {"employee_count": 100},
+    }
+
+    save_postgres_request(connection, entry)
+
+    sql, params = connection.execute.call_args.args
+
+    assert "ON CONFLICT" in sql
+    assert "IS NOT DISTINCT FROM" in sql
+    assert len(params) == 16
+    assert params[0] == "test-request-001"
+    assert params[1] == "customer-001"
+    assert params[3] == json.dumps(["employee_count"])
+    assert params[10] == 0
+    assert params[14] == json.dumps({"employee_count": 100})
+
+    connection.commit.assert_not_called()
+
+
+def test_save_postgres_request_rejects_ownership_change():
+    from unittest.mock import MagicMock
+    from postgres_database import save_postgres_request
+    import pytest
+
+    connection = MagicMock()
+    connection.execute.return_value.rowcount = 0
+
+    with pytest.raises(
+        ValueError,
+        match="Cannot change request customer ownership",
+    ):
+        save_postgres_request(
+            connection,
+            {
+                "request_id": "test-request-001",
+                "customer_id": "different-customer",
+            },
+        )
+
+    connection.commit.assert_not_called()
+
+def test_get_postgres_requests():
+    from unittest.mock import MagicMock
+    from postgres_database import get_postgres_requests
+
+    connection = MagicMock()
+    connection.execute.return_value.fetchall.return_value = []
+
+    result = get_postgres_requests(
+        connection,
+        "customer",
+        "customer-001",
+        10,
+    )
+
+    sql, params = connection.execute.call_args.args
+
+    assert "customer_id = %s" in sql
+    assert "ORDER BY created_at DESC" in sql
+    assert "LIMIT %s" in sql
+    assert params == ("customer", "customer-001", 10)
+    assert result == []
+
+
+def test_get_postgres_request():
+    from unittest.mock import MagicMock
+    from postgres_database import get_postgres_request
+
+    connection = MagicMock()
+    connection.execute.return_value.fetchone.return_value = None
+
+    result = get_postgres_request(
+        connection,
+        "request-001",
+        "customer",
+        "customer-001",
+    )
+
+    sql, params = connection.execute.call_args.args
+
+    assert "request_id = %s" in sql
+    assert "customer_id = %s" in sql
+    assert params == (
+        "request-001",
+        "customer",
+        "customer-001",
+    )
+    assert result is None

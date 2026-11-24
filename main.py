@@ -22,6 +22,9 @@ from postgres_database import (
     consume_postgres_customer_usage,
     rotate_postgres_customer_api_key,
     insert_postgres_admin_audit_log,
+    save_postgres_request,
+    get_postgres_requests,
+    get_postgres_request,
 )
 from datetime import datetime, timezone
 
@@ -644,6 +647,11 @@ def get_live_fallback_provider(provider: str, need: list[str]):
 
 def save_request_to_db(entry: dict):
 
+    if DB_ENGINE == "postgres":
+        with get_postgres_connection() as pg_conn:
+            save_postgres_request(pg_conn, entry)
+        return
+
     existing = conn.execute(
         "SELECT customer_id FROM requests WHERE request_id = ?",
         (entry.get("request_id"),),
@@ -1153,24 +1161,33 @@ def get_requests(
     limit: int = Query(10, ge=1, le=100),
     auth: dict = Depends(verify_api_key),
 ):
-    cursor.execute("""
-        SELECT
-            request_id,
-            domain,
-            need,
-            max_cost,
-            max_latency_ms,
-            status,
-            reason,
-            provider,
-            original_provider,
-            fallback_used,
-            fallback_reason,
-            cost,
-            latency_ms,
-            result,
-            created_at
 
+    if DB_ENGINE == "postgres":
+        with get_postgres_connection() as pg_conn:
+            rows = get_postgres_requests(
+                pg_conn,
+                auth["type"],
+                auth.get("customer_id"),
+                limit,
+            )
+    else:
+        cursor.execute("""
+            SELECT
+                request_id,
+                domain,
+                need,
+                max_cost,
+                max_latency_ms,
+                status,
+                reason,
+                provider,
+                original_provider,
+                fallback_used,
+                fallback_reason,
+                cost,
+                latency_ms,
+                result,
+                created_at
             FROM requests
             WHERE (? = 'system' OR customer_id = ?)
             ORDER BY created_at DESC
@@ -1181,7 +1198,7 @@ def get_requests(
             limit,
         ))
 
-    rows = cursor.fetchall()
+        rows = cursor.fetchall()
 
     return [
         {
@@ -1209,34 +1226,43 @@ def get_request(
     request_id: str,
     auth: dict = Depends(verify_api_key),
 ):
-    cursor.execute("""
-        SELECT
-            request_id,
-            domain,
-            need,
-            max_cost,
-            max_latency_ms,
-            status,
-            reason,
-            provider,
-            original_provider,
-            fallback_used,
-            fallback_reason,
-            cost,
-            latency_ms,
-            result,
-            created_at
 
-            FROM requests
-            WHERE request_id = ?
-            AND (? = 'system' OR customer_id = ?)
-            """, (
+    if DB_ENGINE == "postgres":
+        with get_postgres_connection() as pg_conn:
+            row = get_postgres_request(
+                pg_conn,
                 request_id,
                 auth["type"],
                 auth.get("customer_id"),
-            ))
+            )
+    else:
+        cursor.execute("""
+            SELECT
+                request_id,
+                domain,
+                need,
+                max_cost,
+                max_latency_ms,
+                status,
+                reason,
+                provider,
+                original_provider,
+                fallback_used,
+                fallback_reason,
+                cost,
+                latency_ms,
+                result,
+                created_at
+            FROM requests
+            WHERE request_id = ?
+            AND (? = 'system' OR customer_id = ?)
+        """, (
+            request_id,
+            auth["type"],
+            auth.get("customer_id"),
+        ))
 
-    row = cursor.fetchone()
+        row = cursor.fetchone()
 
     if row is None:
         raise HTTPException(

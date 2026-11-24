@@ -158,3 +158,128 @@ def insert_postgres_admin_audit_log(
         """,
         (action, customer_id, actor),
     )
+
+def save_postgres_request(connection, entry: dict) -> None:
+    """Store a request without allowing ownership changes."""
+    import json
+
+    result = connection.execute(
+        """
+        INSERT INTO requests (
+            request_id,
+            customer_id,
+            domain,
+            need,
+            max_cost,
+            max_latency_ms,
+            status,
+            reason,
+            provider,
+            original_provider,
+            fallback_used,
+            fallback_reason,
+            cost,
+            latency_ms,
+            result,
+            created_at
+        )
+        VALUES (
+            %s, %s, %s, %s,
+            %s, %s, %s, %s,
+            %s, %s, %s, %s,
+            %s, %s, %s, %s
+        )
+        ON CONFLICT (request_id) DO UPDATE SET
+            domain = excluded.domain,
+            need = excluded.need,
+            max_cost = excluded.max_cost,
+            max_latency_ms = excluded.max_latency_ms,
+            status = excluded.status,
+            reason = excluded.reason,
+            provider = excluded.provider,
+            original_provider = excluded.original_provider,
+            fallback_used = excluded.fallback_used,
+            fallback_reason = excluded.fallback_reason,
+            cost = excluded.cost,
+            latency_ms = excluded.latency_ms,
+            result = excluded.result
+        WHERE requests.customer_id
+            IS NOT DISTINCT FROM excluded.customer_id
+        """,
+        (
+            entry.get("request_id"),
+            entry.get("customer_id"),
+            entry.get("domain"),
+            json.dumps(entry.get("need")),
+            entry.get("max_cost"),
+            entry.get("max_latency_ms"),
+            entry.get("status"),
+            entry.get("reason"),
+            entry.get("provider"),
+            entry.get("original_provider"),
+            1 if entry.get("fallback_used") else 0,
+            entry.get("fallback_reason"),
+            entry.get("cost"),
+            entry.get("latency_ms"),
+            json.dumps(entry.get("result")),
+            entry.get("created_at"),
+        ),
+    )
+
+    if result.rowcount != 1:
+        raise ValueError(
+            "Cannot change request customer ownership"
+        )
+
+POSTGRES_REQUEST_COLUMNS = """
+    request_id,
+    domain,
+    need,
+    max_cost,
+    max_latency_ms,
+    status,
+    reason,
+    provider,
+    original_provider,
+    fallback_used,
+    fallback_reason,
+    cost,
+    latency_ms,
+    result,
+    created_at
+"""
+
+
+def get_postgres_requests(
+    connection,
+    auth_type: str,
+    customer_id,
+    limit: int = 10,
+):
+    return connection.execute(
+        f"""
+        SELECT {POSTGRES_REQUEST_COLUMNS}
+        FROM requests
+        WHERE (%s = 'system' OR customer_id = %s)
+        ORDER BY created_at DESC
+        LIMIT %s
+        """,
+        (auth_type, customer_id, limit),
+    ).fetchall()
+
+
+def get_postgres_request(
+    connection,
+    request_id: str,
+    auth_type: str,
+    customer_id,
+):
+    return connection.execute(
+        f"""
+        SELECT {POSTGRES_REQUEST_COLUMNS}
+        FROM requests
+        WHERE request_id = %s
+        AND (%s = 'system' OR customer_id = %s)
+        """,
+        (request_id, auth_type, customer_id),
+    ).fetchone()
