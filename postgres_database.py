@@ -12,7 +12,10 @@ def get_postgres_connection():
 
     import psycopg
 
-    return psycopg.connect(database_url)
+    return psycopg.connect(
+        database_url,
+        connect_timeout=5,
+    )
 
 def postgres_sql(sql: str) -> str:
     """Convert placeholders while preserving single-quoted SQL strings."""
@@ -366,3 +369,232 @@ def get_postgres_stats(connection, auth_type, customer_id):
         "estimated_total_cost": round(float(cost), 2),
         "average_latency_ms": round(float(latency), 2),
     }
+
+def validate_postgres_startup() -> None:
+    """Validate PostgreSQL connectivity and required tables."""
+
+    required_tables = (
+        "customers",
+        "customer_usage",
+        "requests",
+        "admin_audit_logs",
+    )
+
+    with get_postgres_connection() as connection:
+        row = connection.execute("SELECT 1").fetchone()
+
+        if row is None or row[0] != 1:
+            raise RuntimeError(
+                "PostgreSQL connectivity validation failed"
+            )
+
+        missing_tables = [
+            table
+            for table in required_tables
+            if not postgres_table_exists(connection, table)
+        ]
+
+        if missing_tables:
+            raise RuntimeError(
+                "Missing PostgreSQL tables: "
+                + ", ".join(missing_tables)
+            )
+        validate_postgres_columns(connection)
+        validate_postgres_column_types(connection)
+        validate_postgres_constraints(connection)
+        validate_postgres_permissions(connection)
+
+def validate_postgres_columns(connection) -> None:
+    """Ensure all required database columns exist."""
+
+    required_columns = {
+        "customers": {
+            "customer_id", "name", "api_key_hash",
+            "monthly_limit", "active", "created_at",
+        },
+        "customer_usage": {
+            "customer_id", "period", "request_count",
+        },
+        "requests": {
+            "request_id", "customer_id", "domain",
+            "need", "max_cost", "max_latency_ms",
+            "status", "reason", "provider",
+            "original_provider", "fallback_used",
+            "fallback_reason", "cost", "latency_ms",
+            "result", "created_at",
+        },
+        "admin_audit_logs": {
+            "id", "action", "customer_id",
+            "actor", "created_at",
+        },
+    }
+
+    rows = connection.execute("""
+        SELECT table_name, column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+    """).fetchall()
+
+    existing_columns = {}
+
+    for table, column in rows:
+        existing_columns.setdefault(table, set()).add(column)
+
+    for table, required in required_columns.items():
+        missing = required - existing_columns.get(table, set())
+
+        if missing:
+            raise RuntimeError(
+                f"Missing columns in {table}: "
+                + ", ".join(sorted(missing))
+            )
+
+def validate_postgres_column_types(connection) -> None:
+    """Validate required PostgreSQL column data types."""
+
+    expected_types = {
+        "customers": {
+            "customer_id": "text",
+            "name": "text",
+            "api_key_hash": "text",
+            "monthly_limit": "integer",
+            "active": "integer",
+            "created_at": "text",
+        },
+        "customer_usage": {
+            "customer_id": "text",
+            "period": "text",
+            "request_count": "integer",
+        },
+        "requests": {
+            "request_id": "text",
+            "customer_id": "text",
+            "domain": "text",
+            "need": "text",
+            "max_cost": "double precision",
+            "max_latency_ms": "integer",
+            "status": "text",
+            "reason": "text",
+            "provider": "text",
+            "original_provider": "text",
+            "fallback_used": "integer",
+            "fallback_reason": "text",
+            "cost": "double precision",
+            "latency_ms": "integer",
+            "result": "text",
+            "created_at": "text",
+        },
+        "admin_audit_logs": {
+            "id": "integer",
+            "action": "text",
+            "customer_id": "text",
+            "actor": "text",
+            "created_at": "text",
+        },
+    }
+
+    rows = connection.execute("""
+        SELECT table_name, column_name, data_type
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+    """).fetchall()
+
+    actual_types = {
+        (table, column): data_type
+        for table, column, data_type in rows
+    }
+
+    for table, columns in expected_types.items():
+        for column, expected in columns.items():
+            actual = actual_types.get((table, column))
+
+            if actual != expected:
+                raise RuntimeError(
+                    f"Invalid PostgreSQL column type: "
+                    f"{table}.{column}; "
+                    f"expected {expected}, found {actual}"
+                )
+
+def validate_postgres_constraints(connection) -> None:
+    """Validate required PostgreSQL database constraints."""
+
+    required_constraints = {
+        ("customers", "PRIMARY KEY (customer_id)"),
+        ("customers", "UNIQUE (api_key_hash)"),
+        ("customer_usage", "PRIMARY KEY (customer_id, period)"),
+        (
+            "customer_usage",
+            "FOREIGN KEY (customer_id) REFERENCES customers(customer_id)",
+        ),
+        ("requests", "PRIMARY KEY (request_id)"),
+        ("admin_audit_logs", "PRIMARY KEY (id)"),
+    }
+
+    rows = connection.execute("""
+        SELECT
+            rel.relname,
+            pg_get_constraintdef(con.oid)
+        FROM pg_constraint con
+        JOIN pg_class rel ON rel.oid = con.conrelid
+        JOIN pg_namespace ns ON ns.oid = rel.relnamespace
+        WHERE ns.nspname = 'public'
+          AND con.convalidated = TRUE
+    """).fetchall()
+
+    existing_constraints = set(rows)
+
+    missing = required_constraints - existing_constraints
+
+    if missing:
+        details = ", ".join(
+            f"{table}: {constraint}"
+            for table, constraint in sorted(missing)
+        )
+
+        raise RuntimeError(
+            "Missing PostgreSQL constraints: " + details
+        )
+
+def validate_postgres_permissions(connection) -> None:
+    """Validate required PostgreSQL application permissions."""
+
+    required_permissions = {
+        "customers": ("SELECT", "INSERT", "UPDATE"),
+        "customer_usage": ("SELECT", "INSERT", "UPDATE"),
+        "requests": ("SELECT", "INSERT", "UPDATE"),
+        "admin_audit_logs": ("INSERT",),
+    }
+
+    for table, permissions in required_permissions.items():
+        for permission in permissions:
+            row = connection.execute(
+                "SELECT has_table_privilege(%s, %s)",
+                (f"public.{table}", permission),
+            ).fetchone()
+
+            if not row or not row[0]:
+                raise RuntimeError(
+                    f"Missing PostgreSQL permission: "
+                    f"{table}.{permission}"
+                )
+
+    row = connection.execute("""
+        SELECT pg_get_serial_sequence(
+            'public.admin_audit_logs', 'id'
+        )
+    """).fetchone()
+
+    if not row or not row[0]:
+        raise RuntimeError("Missing audit log sequence")
+
+    sequence = row[0]
+
+    allowed = connection.execute(
+        "SELECT has_sequence_privilege(%s, 'USAGE')",
+        (sequence,),
+    ).fetchone()
+
+    if not allowed or not allowed[0]:
+        raise RuntimeError(
+            "Missing audit log sequence USAGE permission"
+        )

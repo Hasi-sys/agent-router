@@ -13,6 +13,7 @@ import urllib.error
 import secrets
 import hashlib
 import logging
+from contextlib import asynccontextmanager
 from database import get_sqlite_connection, ensure_request_columns
 from postgres_database import (
     create_postgres_customer,
@@ -27,6 +28,7 @@ from postgres_database import (
     get_postgres_request,
     check_postgres_health,
     get_postgres_stats,
+    validate_postgres_startup,
 )
 from datetime import datetime, timezone
 
@@ -273,66 +275,86 @@ def verify_api_key(x_api_key: str = Header(None)):
         "name": customer[1],
         "monthly_limit": customer[2],
     }
+conn = None
+cursor = None
 
-conn = get_sqlite_connection(DB_PATH)
-cursor = conn.cursor()
+if DB_ENGINE == "sqlite":
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS customers (
-    customer_id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    api_key_hash TEXT NOT NULL UNIQUE,
-    monthly_limit INTEGER NOT NULL DEFAULT 1000,
-    active INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL
-)
-""")
+    conn = get_sqlite_connection(DB_PATH)
+    cursor = conn.cursor()
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS admin_audit_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    action TEXT NOT NULL,
-    customer_id TEXT NOT NULL,
-    actor TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-)
-""")
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS customers (
+        customer_id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        api_key_hash TEXT NOT NULL UNIQUE,
+        monthly_limit INTEGER NOT NULL DEFAULT 1000,
+        active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL
+    )
+    """)
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS customer_usage (
-    customer_id TEXT NOT NULL,
-    period TEXT NOT NULL,
-    request_count INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (customer_id, period),
-    FOREIGN KEY (customer_id) REFERENCES customers(customer_id)
-)
-""")
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS admin_audit_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        action TEXT NOT NULL,
+        customer_id TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS requests (
-    request_id TEXT PRIMARY KEY,
-    domain TEXT,
-    need TEXT,
-    max_cost REAL,
-    max_latency_ms INTEGER,
-    status TEXT,
-    reason TEXT,
-    provider TEXT,
-    original_provider TEXT,
-    fallback_used INTEGER,
-    fallback_reason TEXT,
-    cost REAL,
-    latency_ms INTEGER,
-    result TEXT,
-    created_at TEXT
-)
-""")
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS customer_usage (
+        customer_id TEXT NOT NULL,
+        period TEXT NOT NULL,
+        request_count INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (customer_id, period),
+        FOREIGN KEY (customer_id) REFERENCES customers(customer_id)
+    )
+    """)
 
-conn.commit()
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS requests (
+        request_id TEXT PRIMARY KEY,
+        domain TEXT,
+        need TEXT,
+        max_cost REAL,
+        max_latency_ms INTEGER,
+        status TEXT,
+        reason TEXT,
+        provider TEXT,
+        original_provider TEXT,
+        fallback_used INTEGER,
+        fallback_reason TEXT,
+        cost REAL,
+        latency_ms INTEGER,
+        result TEXT,
+        created_at TEXT
+    )
+    """)
 
-ensure_request_columns(conn)
+    conn.commit()
 
-app = FastAPI()
+    ensure_request_columns(conn)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if DB_ENGINE == "postgres":
+        try:
+            validate_postgres_startup()
+        except Exception:
+            logger.error("PostgreSQL startup validation failed")
+            raise RuntimeError(
+                "PostgreSQL startup validation failed"
+            ) from None
+
+        logger.info("PostgreSQL startup validation passed")
+
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 class EnrichmentRequest(BaseModel):
     domain: str = Field(..., examples=["stripe.com"])
@@ -1419,76 +1441,4 @@ def get_stats(auth: dict = Depends(verify_api_key)):
         "provider_usage": dict(provider_rows),
         "estimated_total_cost": round(float(cost), 2),
         "average_latency_ms": round(float(latency), 2),
-    }
-        # Aggregate operational metrics from request history
-
-    cursor.execute("SELECT COUNT(*) FROM requests")
-    total_requests = cursor.fetchone()[0]
-
-    cursor.execute(
-        "SELECT COUNT(*) FROM requests WHERE status = 'rejected'"
-    )
-    rejected_requests = cursor.fetchone()[0]
-
-    cursor.execute(
-        "SELECT COUNT(*) FROM requests WHERE fallback_used = 1"
-    )
-    fallback_requests = cursor.fetchone()[0]
-
-    cursor.execute(
-    "SELECT COUNT(*) FROM requests WHERE status != 'rejected'"
-    )
-    completed_requests = cursor.fetchone()[0]
-
-    success_rate = (
-        round((completed_requests / total_requests) * 100, 2)
-        if total_requests > 0
-        else 0
-    )
-
-    fallback_rate = (
-        round((fallback_requests / total_requests) * 100, 2)
-        if total_requests > 0
-        else 0
-    )
-
-    cursor.execute("""
-        SELECT provider, COUNT(*)
-        FROM requests
-        WHERE provider IS NOT NULL
-        GROUP BY provider
-    """)
-    provider_rows = cursor.fetchall()
-
-    provider_usage = {
-        provider: count
-        for provider, count in provider_rows
-    }
-
-    cursor.execute("""
-        SELECT COALESCE(SUM(cost), 0)
-        FROM requests
-        WHERE status != 'rejected'
-    """)
-    estimated_total_cost = round(cursor.fetchone()[0], 2)
-
-    cursor.execute("""
-        SELECT COALESCE(AVG(latency_ms), 0)
-        FROM requests
-        WHERE latency_ms IS NOT NULL
-        AND status != 'rejected'
-    """)
-    average_latency_ms = round(cursor.fetchone()[0], 2)
-
-    return {
-        "status": "ok",
-        "total_requests": total_requests,
-        "rejected_requests": rejected_requests,
-        "fallback_requests": fallback_requests,
-        "completed_requests": completed_requests,
-        "success_rate": success_rate,
-        "fallback_rate": fallback_rate,
-        "provider_usage": provider_usage,
-        "estimated_total_cost": estimated_total_cost,
-        "average_latency_ms": average_latency_ms
     }

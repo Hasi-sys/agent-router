@@ -1776,8 +1776,9 @@ def test_postgres_connection_uses_database_url(monkeypatch):
     fake_connection = object()
     captured = {}
 
-    def fake_connect(url):
+    def fake_connect(url, **kwargs):
         captured["url"] = url
+        captured["connect_timeout"] = kwargs.get("connect_timeout")
         return fake_connection
 
     monkeypatch.setenv("DATABASE_URL", database_url)
@@ -2789,3 +2790,188 @@ def test_sqlite_stats_customer_isolation(monkeypatch):
 
     finally:
         connection.close()
+
+def test_postgres_connection_timeout(monkeypatch):
+    import psycopg
+    from unittest.mock import MagicMock
+    from postgres_database import get_postgres_connection
+
+    database_url = "postgresql://test:fake@localhost/test_db"
+
+    monkeypatch.setenv("DATABASE_URL", database_url)
+
+    mock_connect = MagicMock()
+    monkeypatch.setattr(psycopg, "connect", mock_connect)
+
+    get_postgres_connection()
+
+    mock_connect.assert_called_once_with(
+        database_url,
+        connect_timeout=5,
+    )
+
+
+def test_postgres_connection_missing_url(monkeypatch):
+    import pytest
+    from postgres_database import get_postgres_connection
+
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    with pytest.raises(
+        ValueError,
+        match="DATABASE_URL is required for PostgreSQL",
+    ):
+        get_postgres_connection()
+
+def test_postgres_startup_validation_success(monkeypatch):
+    import main
+    from unittest.mock import MagicMock
+    from fastapi.testclient import TestClient
+
+    validate = MagicMock()
+
+    monkeypatch.setattr(main, "DB_ENGINE", "postgres")
+    monkeypatch.setattr(
+        main, "validate_postgres_startup", validate
+    )
+
+    with TestClient(main.app):
+        validate.assert_called_once()
+
+
+def test_postgres_startup_validation_failure(monkeypatch):
+    import main
+    import pytest
+    from fastapi.testclient import TestClient
+
+    def unavailable():
+        raise RuntimeError("Database unavailable")
+
+    monkeypatch.setattr(main, "DB_ENGINE", "postgres")
+    monkeypatch.setattr(
+        main, "validate_postgres_startup", unavailable
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="PostgreSQL startup validation failed",
+    ):
+        with TestClient(main.app):
+            pass
+
+
+def test_sqlite_startup_skips_postgres_validation(monkeypatch):
+    import main
+    from unittest.mock import MagicMock
+    from fastapi.testclient import TestClient
+
+    validate = MagicMock()
+
+    monkeypatch.setattr(main, "DB_ENGINE", "sqlite")
+    monkeypatch.setattr(
+        main, "validate_postgres_startup", validate
+    )
+
+    with TestClient(main.app):
+        validate.assert_not_called()
+
+def test_postgres_schema_rejects_missing_columns():
+    import pytest
+    from unittest.mock import MagicMock
+    from postgres_database import validate_postgres_columns
+
+    connection = MagicMock()
+
+    connection.execute.return_value.fetchall.return_value = [
+        ("customers", "customer_id"),
+        ("customers", "name"),
+        ("customers", "monthly_limit"),
+        ("customers", "active"),
+        ("customers", "created_at"),
+    ]
+
+    with pytest.raises(
+        RuntimeError,
+        match="Missing columns in customers: api_key_hash",
+    ):
+        validate_postgres_columns(connection)
+
+def test_postgres_schema_rejects_incorrect_column_type():
+    import pytest
+    from unittest.mock import MagicMock
+    from postgres_database import validate_postgres_column_types
+
+    connection = MagicMock()
+
+    connection.execute.return_value.fetchall.return_value = [
+        ("customers", "customer_id", "text"),
+        ("customers", "name", "text"),
+        ("customers", "api_key_hash", "text"),
+        ("customers", "monthly_limit", "text"),
+        ("customers", "active", "integer"),
+        ("customers", "created_at", "text"),
+    ]
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"customers\.monthly_limit; expected integer, found text",
+    ):
+        validate_postgres_column_types(connection)
+
+def test_postgres_schema_rejects_missing_constraint():
+    import pytest
+    from unittest.mock import MagicMock
+    from postgres_database import validate_postgres_constraints
+
+    connection = MagicMock()
+
+    connection.execute.return_value.fetchall.return_value = [
+        ("customers", "PRIMARY KEY (customer_id)"),
+        ("customer_usage", "PRIMARY KEY (customer_id, period)"),
+        (
+            "customer_usage",
+            "FOREIGN KEY (customer_id) REFERENCES customers(customer_id)",
+        ),
+        ("requests", "PRIMARY KEY (request_id)"),
+        ("admin_audit_logs", "PRIMARY KEY (id)"),
+    ]
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"customers: UNIQUE \(api_key_hash\)",
+    ):
+        validate_postgres_constraints(connection)
+
+def test_postgres_startup_rejects_missing_table_permission():
+    import pytest
+    from unittest.mock import MagicMock
+    from postgres_database import validate_postgres_permissions
+
+    connection = MagicMock()
+    connection.execute.return_value.fetchone.return_value = (False,)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"Missing PostgreSQL permission: customers\.SELECT",
+    ):
+        validate_postgres_permissions(connection)
+
+
+def test_postgres_startup_rejects_missing_sequence_permission():
+    import pytest
+    from unittest.mock import MagicMock
+    from postgres_database import validate_postgres_permissions
+
+    connection = MagicMock()
+
+    connection.execute.return_value.fetchone.side_effect = (
+        [(True,)] * 10
+        + [("public.admin_audit_logs_id_seq",)]
+        + [(False,)]
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="Missing audit log sequence USAGE permission",
+    ):
+        validate_postgres_permissions(connection)
