@@ -283,3 +283,86 @@ def get_postgres_request(
         """,
         (request_id, auth_type, customer_id),
     ).fetchone()
+
+def check_postgres_health() -> bool:
+    """Verify PostgreSQL database connectivity."""
+    with get_postgres_connection() as connection:
+        row = connection.execute("SELECT 1").fetchone()
+
+        return row is not None and row[0] == 1
+
+def get_postgres_stats(connection, auth_type, customer_id):
+    """Return operational metrics within the authorized scope."""
+
+    filters = (auth_type, customer_id)
+
+    row = connection.execute(
+        """
+        SELECT
+            COUNT(*),
+            COUNT(*) FILTER (WHERE status = 'rejected'),
+            COUNT(*) FILTER (WHERE fallback_used = 1),
+            COUNT(*) FILTER (WHERE status != 'rejected'),
+            COUNT(*) FILTER (WHERE status = 'success'),
+            COUNT(*) FILTER (WHERE status = 'mock'),
+            COUNT(*) FILTER (WHERE status = 'error'),
+            COALESCE(
+                SUM(cost) FILTER (
+                    WHERE status != 'rejected'
+                ), 0
+            ),
+            COALESCE(
+                AVG(latency_ms) FILTER (
+                    WHERE status != 'rejected'
+                ), 0
+            )
+        FROM requests
+        WHERE (%s = 'system' OR customer_id = %s)
+        """,
+        filters,
+    ).fetchone()
+
+    provider_rows = connection.execute(
+        """
+        SELECT provider, COUNT(*)
+        FROM requests
+        WHERE provider IS NOT NULL
+        AND (%s = 'system' OR customer_id = %s)
+        GROUP BY provider
+        """,
+        filters,
+    ).fetchall()
+
+    (
+        total,
+        rejected,
+        fallback,
+        completed,
+        successful,
+        mocked,
+        failed,
+        cost,
+        latency,
+    ) = row
+
+    return {
+        "status": "ok",
+        "total_requests": total,
+        "rejected_requests": rejected,
+        "fallback_requests": fallback,
+        "completed_requests": completed,
+        "successful_requests": successful,
+        "mock_requests": mocked,
+        "failed_requests": failed,
+        "success_rate": (
+            round(successful / total * 100, 2)
+            if total else 0
+        ),
+        "fallback_rate": (
+            round(fallback / total * 100, 2)
+            if total else 0
+        ),
+        "provider_usage": dict(provider_rows),
+        "estimated_total_cost": round(float(cost), 2),
+        "average_latency_ms": round(float(latency), 2),
+    }

@@ -392,3 +392,201 @@ with get_postgres_connection() as conn:
         conn.rollback()
 
 print("PASS: Temporary history test data removed")
+
+from postgres_database import get_postgres_stats
+
+stats_owner_a = str(uuid.uuid4())
+stats_owner_b = str(uuid.uuid4())
+
+with get_postgres_connection() as conn:
+    try:
+        baseline = get_postgres_stats(conn, "system", None)
+
+        for owner, status, provider, cost, latency, fallback in [
+            (stats_owner_a, "success", "apollo", 0.10, 100, False),
+            (stats_owner_a, "success", "hunter", 0.20, 200, True),
+            (stats_owner_a, "rejected", None, 0, None, False),
+            (stats_owner_b, "success", "pdl", 0.50, 300, False),
+        ]:
+            stats_entry = dict(entry)
+            stats_entry.update({
+                "request_id": str(uuid.uuid4()),
+                "customer_id": owner,
+                "status": status,
+                "provider": provider,
+                "cost": cost,
+                "latency_ms": latency,
+                "fallback_used": fallback,
+            })
+
+            save_postgres_request(conn, stats_entry)
+
+        stats_a = get_postgres_stats(
+            conn, "customer", stats_owner_a
+        )
+
+        assert stats_a["total_requests"] == 3
+        assert stats_a["completed_requests"] == 2
+        assert stats_a["rejected_requests"] == 1
+        assert stats_a["fallback_requests"] == 1
+        assert stats_a["success_rate"] == 66.67
+        assert stats_a["fallback_rate"] == 33.33
+
+        print("PASS: PostgreSQL analytics calculations")
+
+        assert stats_a["estimated_total_cost"] == 0.30
+        assert stats_a["average_latency_ms"] == 150.0
+
+        print("PASS: Cost and latency analytics")
+
+        assert stats_a["provider_usage"] == {
+            "apollo": 1,
+            "hunter": 1,
+        }
+
+        print("PASS: Provider usage analytics")
+
+        stats_b = get_postgres_stats(
+            conn, "customer", stats_owner_b
+        )
+
+        assert stats_b["total_requests"] == 1
+        assert stats_b["estimated_total_cost"] == 0.50
+        assert stats_b["provider_usage"] == {"pdl": 1}
+
+        print("PASS: Analytics customer isolation")
+
+        admin_stats = get_postgres_stats(
+            conn, "system", None
+        )
+
+        assert admin_stats["total_requests"] == (
+            baseline["total_requests"] + 4
+        )
+
+        print("PASS: Administrator global analytics")
+
+        empty_stats = get_postgres_stats(
+            conn, "customer", str(uuid.uuid4())
+        )
+
+        assert empty_stats["total_requests"] == 0
+        assert empty_stats["provider_usage"] == {}
+
+        print("PASS: Empty customer analytics")
+
+    finally:
+        conn.rollback()
+
+print("PASS: Temporary analytics data rolled back")
+
+with TestClient(main.app) as stats_client:
+    stats_customers = []
+    stats_request_ids = []
+
+    try:
+        for label, cost in (("A", 0.10), ("B", 0.50)):
+            customer = main.create_customer(
+                f"Temporary stats customer {label}", 10
+            )
+            stats_customers.append(customer)
+
+            test_entry = dict(entry)
+            test_entry.update({
+                "request_id": str(uuid.uuid4()),
+                "customer_id": customer["customer_id"],
+                "status": "success",
+                "cost": cost,
+                "provider": "apollo",
+                "fallback_used": False,
+            })
+
+            stats_request_ids.append(
+                test_entry["request_id"]
+            )
+
+            main.save_request_to_db(test_entry)
+
+        for customer, expected_cost in zip(
+            stats_customers, (0.10, 0.50)
+        ):
+            response = stats_client.get(
+                "/stats",
+                headers={
+                    "x-api-key": customer["api_key"]
+                },
+            )
+
+            assert response.status_code == 200
+            data = response.json()
+
+            assert data["total_requests"] == 1
+            assert data["estimated_total_cost"] == expected_cost
+
+        print("PASS: HTTP analytics customer isolation")
+
+        response = stats_client.get(
+            "/stats",
+            headers={"x-api-key": main.ROUTER_API_KEY},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["total_requests"] >= 2
+
+        print("PASS: Administrator HTTP analytics access")
+
+        assert stats_client.get("/stats").status_code == 401
+
+        print("PASS: Unauthenticated analytics blocked")
+
+    finally:
+        with get_postgres_connection() as conn:
+            for request_id in stats_request_ids:
+                conn.execute(
+                    "DELETE FROM requests WHERE request_id = %s",
+                    (request_id,),
+                )
+
+            for customer in stats_customers:
+                conn.execute(
+                    "DELETE FROM customers WHERE customer_id = %s",
+                    (customer["customer_id"],),
+                )
+
+print("PASS: Temporary HTTP analytics data removed")
+
+status_owner = str(uuid.uuid4())
+
+with get_postgres_connection() as conn:
+    try:
+        for status in ("success", "mock", "error", "rejected"):
+            status_entry = dict(entry)
+            status_entry.update({
+                "request_id": str(uuid.uuid4()),
+                "customer_id": status_owner,
+                "status": status,
+            })
+
+            save_postgres_request(conn, status_entry)
+
+        stats = get_postgres_stats(
+            conn, "customer", status_owner
+        )
+
+        assert stats["total_requests"] == 4
+        assert stats["successful_requests"] == 1
+        assert stats["mock_requests"] == 1
+        assert stats["failed_requests"] == 1
+        assert stats["rejected_requests"] == 1
+        assert stats["completed_requests"] == 3
+
+        print("PASS: Request status classification")
+
+        assert stats["success_rate"] == 25.0
+
+        print("PASS: Genuine success rate verified")
+
+    finally:
+        conn.rollback()
+
+print("PASS: Temporary status test data rolled back")

@@ -2612,3 +2612,180 @@ def test_get_postgres_request():
         "customer-001",
     )
     assert result is None
+
+def test_postgres_health_success(monkeypatch):
+    import main
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(main, "DB_ENGINE", "postgres")
+    monkeypatch.setattr(
+        main, "check_postgres_health", lambda: True
+    )
+
+    with TestClient(main.app) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert response.json()["database"] == "connected"
+    assert response.json()["database_engine"] == "postgres"
+    assert "db_path" not in response.json()
+
+
+def test_postgres_health_failure(monkeypatch):
+    import main
+    from fastapi.testclient import TestClient
+
+    def unavailable():
+        raise RuntimeError("Database connection failed")
+
+    monkeypatch.setattr(main, "DB_ENGINE", "postgres")
+    monkeypatch.setattr(
+        main, "check_postgres_health", unavailable
+    )
+
+    with TestClient(main.app) as client:
+        response = client.get("/health")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Database unavailable"
+
+def test_get_postgres_stats():
+    from unittest.mock import MagicMock
+    from postgres_database import get_postgres_stats
+
+    connection = MagicMock()
+
+    metrics = MagicMock()
+    metrics.fetchone.return_value = (
+        4, 1, 1, 3, 1, 1, 1, 0.30, 150.0
+    )
+
+    providers = MagicMock()
+    providers.fetchall.return_value = [
+        ("apollo", 2),
+        ("hunter", 1),
+    ]
+
+    connection.execute.side_effect = [
+        metrics,
+        providers,
+    ]
+
+    result = get_postgres_stats(
+        connection, "customer", "customer-001"
+    )
+
+    assert result["total_requests"] == 4
+    assert result["rejected_requests"] == 1
+    assert result["completed_requests"] == 3
+    assert result["fallback_requests"] == 1
+    assert result["successful_requests"] == 1
+    assert result["mock_requests"] == 1
+    assert result["failed_requests"] == 1
+    assert result["success_rate"] == 25.0
+    assert result["fallback_rate"] == 25.0
+    assert result["estimated_total_cost"] == 0.30
+    assert result["average_latency_ms"] == 150.0
+    assert result["provider_usage"] == {
+        "apollo": 2,
+        "hunter": 1,
+    }
+
+    for call in connection.execute.call_args_list:
+        assert call.args[1] == (
+            "customer", "customer-001"
+        )
+
+
+def test_get_postgres_stats_empty():
+    from unittest.mock import MagicMock
+    from postgres_database import get_postgres_stats
+
+    connection = MagicMock()
+    connection.execute.return_value.fetchone.return_value = (
+        0, 0, 0, 0, 0, 0, 0, 0, 0
+    )
+    connection.execute.return_value.fetchall.return_value = []
+
+    result = get_postgres_stats(
+        connection, "customer", "empty-customer"
+    )
+
+    assert result["total_requests"] == 0
+    assert result["success_rate"] == 0
+    assert result["fallback_rate"] == 0
+    assert result["provider_usage"] == {}
+    assert result["estimated_total_cost"] == 0
+    assert result["average_latency_ms"] == 0
+
+def test_sqlite_stats_customer_isolation(monkeypatch):
+    import main
+    import sqlite3
+    import uuid
+
+    connection = sqlite3.connect(":memory:")
+
+    try:
+        connection.execute("""
+            CREATE TABLE requests (
+                customer_id TEXT,
+                status TEXT,
+                provider TEXT,
+                fallback_used INTEGER,
+                cost REAL,
+                latency_ms INTEGER
+            )
+        """)
+
+        customer_a = str(uuid.uuid4())
+        customer_b = str(uuid.uuid4())
+
+        connection.executemany(
+            "INSERT INTO requests VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (customer_a, "success", "apollo", 0, 0.10, 100),
+                (customer_a, "mock", "hunter", 0, 0, 100),
+                (customer_a, "error", "apollo", 0, 0, 200),
+                (customer_a, "rejected", None, 0, 0, None),
+                (customer_b, "success", "pdl", 0, 0.50, 300),
+            ],
+        )
+
+        monkeypatch.setattr(main, "DB_ENGINE", "sqlite")
+        monkeypatch.setattr(main, "conn", connection)
+
+        stats_a = main.get_stats({
+            "type": "customer",
+            "customer_id": customer_a,
+        })
+
+        assert stats_a["total_requests"] == 4
+        assert stats_a["successful_requests"] == 1
+        assert stats_a["mock_requests"] == 1
+        assert stats_a["failed_requests"] == 1
+        assert stats_a["rejected_requests"] == 1
+        assert stats_a["success_rate"] == 25.0
+        assert stats_a["estimated_total_cost"] == 0.10
+        assert "pdl" not in stats_a["provider_usage"]
+
+        stats_b = main.get_stats({
+            "type": "customer",
+            "customer_id": customer_b,
+        })
+
+        assert stats_b["total_requests"] == 1
+        assert stats_b["success_rate"] == 100.0
+        assert stats_b["estimated_total_cost"] == 0.50
+
+        admin_stats = main.get_stats({
+            "type": "system",
+            "customer_id": None,
+        })
+
+        assert admin_stats["total_requests"] == 5
+        assert admin_stats["successful_requests"] == 2
+        assert admin_stats["success_rate"] == 40.0
+
+    finally:
+        connection.close()

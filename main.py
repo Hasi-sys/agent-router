@@ -25,6 +25,8 @@ from postgres_database import (
     save_postgres_request,
     get_postgres_requests,
     get_postgres_request,
+    check_postgres_health,
+    get_postgres_stats,
 )
 from datetime import datetime, timezone
 
@@ -1291,22 +1293,29 @@ def get_request(
 @app.get("/health")
 def health():
     try:
-        cursor.execute("SELECT 1")
-        cursor.fetchone()
+        if DB_ENGINE == "postgres":
+            connected = check_postgres_health()
+        else:
+            row = conn.execute("SELECT 1").fetchone()
+            connected = row is not None and row[0] == 1
 
-        return {
-            "status": "ok",
-            "database": "connected",
-            "db_path": DB_PATH
-        }
+        if not connected:
+            raise RuntimeError("Database health check failed")
 
-    except sqlite3.Error:
+    except Exception:
+        logger.error("Database health check failed")
+
         raise HTTPException(
-            status_code=500,
-            detail="Database unavailable"
+            status_code=503,
+            detail="Database unavailable",
         )
 
-@app.get("/")
+    return {
+        "status": "ok",
+        "database": "connected",
+        "database_engine": DB_ENGINE,
+    }
+
 def root():
     return {
         "name": "Agent Router API",
@@ -1331,7 +1340,86 @@ def config(_ = Depends(verify_api_key)):
         "pdl_configured": bool(PDL_API_KEY)
     }
 @app.get("/stats")
-def get_stats(_: None = Depends(verify_api_key)):
+def get_stats(auth: dict = Depends(verify_api_key)):
+    if DB_ENGINE == "postgres":
+        with get_postgres_connection() as pg_conn:
+            return get_postgres_stats(
+                pg_conn,
+                auth["type"],
+                auth.get("customer_id"),
+            )
+
+    filters = (
+        auth["type"],
+        auth.get("customer_id"),
+    )
+
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(*),
+            COUNT(CASE WHEN status = 'rejected' THEN 1 END),
+            COUNT(CASE WHEN fallback_used = 1 THEN 1 END),
+            COUNT(CASE WHEN status != 'rejected' THEN 1 END),
+            COUNT(CASE WHEN status = 'success' THEN 1 END),
+            COUNT(CASE WHEN status = 'mock' THEN 1 END),
+            COUNT(CASE WHEN status = 'error' THEN 1 END),
+            COALESCE(SUM(
+                CASE WHEN status != 'rejected' THEN cost END
+            ), 0),
+            COALESCE(AVG(
+                CASE WHEN status != 'rejected' THEN latency_ms END
+            ), 0)
+        FROM requests
+        WHERE (? = 'system' OR customer_id = ?)
+        """,
+        filters,
+    ).fetchone()
+
+    provider_rows = conn.execute(
+        """
+        SELECT provider, COUNT(*)
+        FROM requests
+        WHERE provider IS NOT NULL
+        AND (? = 'system' OR customer_id = ?)
+        GROUP BY provider
+        """,
+        filters,
+    ).fetchall()
+
+    (
+        total,
+        rejected,
+        fallback,
+        completed,
+        successful,
+        mocked,
+        failed,
+        cost,
+        latency,
+    ) = row
+
+    return {
+        "status": "ok",
+        "total_requests": total,
+        "rejected_requests": rejected,
+        "fallback_requests": fallback,
+        "completed_requests": completed,
+        "successful_requests": successful,
+        "mock_requests": mocked,
+        "failed_requests": failed,
+        "success_rate": (
+            round(successful / total * 100, 2)
+            if total else 0
+        ),
+        "fallback_rate": (
+            round(fallback / total * 100, 2)
+            if total else 0
+        ),
+        "provider_usage": dict(provider_rows),
+        "estimated_total_cost": round(float(cost), 2),
+        "average_latency_ms": round(float(latency), 2),
+    }
         # Aggregate operational metrics from request history
 
     cursor.execute("SELECT COUNT(*) FROM requests")
