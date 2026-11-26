@@ -403,6 +403,7 @@ def validate_postgres_startup() -> None:
         validate_postgres_column_types(connection)
         validate_postgres_constraints(connection)
         validate_postgres_permissions(connection)
+        validate_postgres_nullability(connection)
 
 def validate_postgres_columns(connection) -> None:
     """Ensure all required database columns exist."""
@@ -598,3 +599,43 @@ def validate_postgres_permissions(connection) -> None:
         raise RuntimeError(
             "Missing audit log sequence USAGE permission"
         )
+
+def validate_postgres_nullability(connection) -> None:
+    """Validate mandatory PostgreSQL columns."""
+
+    required_not_null = {
+        "customers": {
+            "customer_id", "name", "api_key_hash",
+            "monthly_limit", "active", "created_at",
+        },
+        "customer_usage": {
+            "customer_id", "period", "request_count",
+        },
+        "admin_audit_logs": {
+            "id", "action", "customer_id",
+            "actor", "created_at",
+        },
+        "requests": {
+            "request_id", "domain", "need",
+            "status", "created_at", "fallback_used",
+        },
+    }
+
+    rows = connection.execute("""
+        SELECT table_name, column_name, is_nullable
+        FROM information_schema.columns
+        WHERE table_schema = 'public'
+    """).fetchall()
+
+    actual = {
+        (table, column): nullable
+        for table, column, nullable in rows
+    }
+
+    for table, columns in required_not_null.items():
+        for column in sorted(columns):
+            if actual.get((table, column)) != "NO":
+                raise RuntimeError(
+                    f"Missing NOT NULL constraint: "
+                    f"{table}.{column}"
+                )

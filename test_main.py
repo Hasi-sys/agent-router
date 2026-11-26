@@ -2526,6 +2526,7 @@ def test_save_postgres_request():
         "provider": "apollo",
         "fallback_used": False,
         "result": {"employee_count": 100},
+        "created_at": "2026-11-25T20:00:00+00:00",
     }
 
     save_postgres_request(connection, entry)
@@ -2540,6 +2541,7 @@ def test_save_postgres_request():
     assert params[3] == json.dumps(["employee_count"])
     assert params[10] == 0
     assert params[14] == json.dumps({"employee_count": 100})
+    assert params[15] == entry["created_at"]
 
     connection.commit.assert_not_called()
 
@@ -2561,6 +2563,10 @@ def test_save_postgres_request_rejects_ownership_change():
             {
                 "request_id": "test-request-001",
                 "customer_id": "different-customer",
+                "domain": "example.com",
+                "need": ["employee_count"],
+                "status": "success",
+                "created_at": "2026-11-25T20:00:00+00:00",
             },
         )
 
@@ -2975,3 +2981,25 @@ def test_postgres_startup_rejects_missing_sequence_permission():
         match="Missing audit log sequence USAGE permission",
     ):
         validate_postgres_permissions(connection)
+
+def test_postgres_schema_rejects_nullable_required_column():
+    import pytest
+    from unittest.mock import MagicMock
+    from postgres_database import validate_postgres_nullability
+
+    connection = MagicMock()
+
+    connection.execute.return_value.fetchall.return_value = [
+        ("customers", "customer_id", "NO"),
+        ("customers", "name", "NO"),
+        ("customers", "api_key_hash", "YES"),
+        ("customers", "monthly_limit", "NO"),
+        ("customers", "active", "NO"),
+        ("customers", "created_at", "NO"),
+    ]
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"Missing NOT NULL constraint: customers\.api_key_hash",
+    ):
+        validate_postgres_nullability(connection)

@@ -1,0 +1,7 @@
+ALTER TABLE public.requests
+    ALTER COLUMN domain SET NOT NULL,
+    ALTER COLUMN need SET NOT NULL,
+    ALTER COLUMN status SET NOT NULL,
+    ALTER COLUMN created_at SET NOT NULL,
+    ALTER COLUMN fallback_used SET DEFAULT 0,
+    ALTER COLUMN fallback_used SET NOT NULL;
